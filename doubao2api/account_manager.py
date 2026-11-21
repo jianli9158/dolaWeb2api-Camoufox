@@ -356,7 +356,10 @@ class AccountManager:
     def clear_cooldowns(self, account_id: str) -> bool:
         if account_id not in self.accounts:
             return False
-        self.accounts[account_id].cooldowns.clear()
+        acc = self.accounts[account_id]
+        acc.cooldowns.clear()
+        if acc.status in ("captcha", "quota_exceeded", "rate_limited"):
+            acc.status = "active"
         self.save()
         return True
 

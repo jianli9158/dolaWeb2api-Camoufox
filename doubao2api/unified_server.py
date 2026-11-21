@@ -1608,6 +1608,11 @@ def create_app(
                 ref_image_key=ref_image_key,
                 **gen_kwargs,
             )
+        except UpstreamAPIError as exc:
+            await _recover_upstream_error(
+                client, exc.upstream_error, feature="image", allow_account_switch=False
+            )
+            raise
         except RuntimeError as exc:
             raise HTTPException(status_code=502, detail=str(exc))
 
@@ -1752,6 +1757,11 @@ def create_app(
                 ref_image_key=ref_image_key,
                 **gen_kwargs,
             )
+        except UpstreamAPIError as exc:
+            await _recover_upstream_error(
+                client, exc.upstream_error, feature="image", allow_account_switch=False
+            )
+            raise
         except RuntimeError as exc:
             raise HTTPException(status_code=502, detail=str(exc))
 
@@ -1995,6 +2005,11 @@ def create_app(
                     raise HTTPException(status_code=429, detail="Video quota is exhausted for all available accounts.")
                 ref_image_keys = await _reupload_image_sources(client, ref_image_keys, image_sources)
                 ref_image_key = ref_image_keys[0] if ref_image_keys else None
+            except UpstreamAPIError as exc:
+                await _recover_upstream_error(
+                    client, exc.upstream_error, feature="video", allow_account_switch=False
+                )
+                raise
             except RuntimeError as exc:
                 raise HTTPException(status_code=502, detail=str(exc))
 
@@ -3122,6 +3137,11 @@ def create_app(
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
+        if body.get("clear_cooldown"):
+            am.clear_cooldowns(account_id)
+            updated = am.get_account(account_id)
+            if client and am.active_account_id == account_id:
+                client.clear_captcha()
         if client and am.active_account_id == account_id and updated and updated.proxy_url != old_proxy:
             if await client.is_alive():
                 asyncio.create_task(client.restart())

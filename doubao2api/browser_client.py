@@ -1053,7 +1053,7 @@ class BrowserClient:
 
         previous = self.account_manager.get_active_account()
         previous_cookies = dict(previous.cookies) if previous else {}
-        previous_proxy = previous.proxy_url if previous else self._proxy_url
+        previous_proxy = (previous.proxy_url or self._proxy_url) if previous else self._proxy_url
         target_proxy = acc.proxy_url or self._proxy_url
 
         # Use strict isolated per-account profile restart whenever switching real Camoufox profiles or proxies
@@ -2020,6 +2020,9 @@ class BrowserClient:
                 raise RuntimeError(
                     f"generate_image error ({event.get('status', 0)}): {str(event.get('body', ''))[:500]}"
                 )
+            if event.get("error_code") and not images:
+                from .upstream_errors import UpstreamAPIError, parse_upstream_error
+                raise UpstreamAPIError(parse_upstream_error(event))
             cid = self.extract_conversation_id(event)
             if cid:
                 conv_id = cid
@@ -2358,6 +2361,9 @@ class BrowserClient:
                         )
                     raise VideoQuotaExceeded("Video generation quota exceeded for active account")
                 raise RuntimeError(f"generate_video error ({event.get('status', 0)}): {detail[:500]}")
+            if event.get("error_code") and not videos:
+                from .upstream_errors import UpstreamAPIError, parse_upstream_error
+                raise UpstreamAPIError(parse_upstream_error(event))
             cid = self.extract_conversation_id(event)
             if cid:
                 conv_id = cid

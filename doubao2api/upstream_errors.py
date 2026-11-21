@@ -212,14 +212,26 @@ def parse_upstream_error(value: Any, status_code: Any = None) -> UpstreamError:
         if m:
             retry_after = _float_positive(m.group(1))
 
-    if explicit_status == 429 or numeric_code == 429:
-        category, mapped_status = "rate_limit", 429
-    elif (
+    has_verify_signal = (
         decision_type == "verify"
         or decision_subtype == "semantic_reasoning"
         or bool(semantic_reasoning)
-        or numeric_code == 710022002
-    ):
+        or bool(re.search(r"captcha|verification|verify|human.?check|人机验证|验证码", text))
+    )
+    has_rate_limit_signal = bool(
+        re.search(
+            r"high demand|try again later|rate[ _-]?limit|too many requests|quota exceeded|daily limit|频率限制|请求过于频繁",
+            text,
+        )
+    )
+
+    if explicit_status == 429 or numeric_code == 429:
+        category, mapped_status = "rate_limit", 429
+    elif numeric_code == 710022002 and has_rate_limit_signal and not has_verify_signal:
+        # Dola returns 710022002 with "We are experiencing high demand right now. Please try again later."
+        # for transient burst / shared-IP rate limits (not an interactive captcha).
+        category, mapped_status = "rate_limit", 429
+    elif has_verify_signal or numeric_code == 710022002:
         category, mapped_status = "verification", 503
     elif (
         explicit_status == 401
@@ -230,21 +242,16 @@ def parse_upstream_error(value: Any, status_code: Any = None) -> UpstreamError:
         )
     ):
         category, mapped_status = "session_expired", 401
-    elif re.search(
-        r"rate[ _-]?limit|too many requests|quota exceeded|daily limit|频率限制|请求过于频繁", text
-    ):
+    elif has_rate_limit_signal:
         category, mapped_status = "rate_limit", 429
-    elif re.search(r"captcha|verification|verify|human.?check|人机验证|验证码", text):
-        category, mapped_status = "verification", 503
     else:
         category, mapped_status = "unknown", 502
 
     if retry_after is None:
         if category == "rate_limit":
-            retry_after = 60.0
+            retry_after = 45.0
         elif category == "verification":
             retry_after = 300.0
-
     return UpstreamError(
         category=category,
         status_code=mapped_status,

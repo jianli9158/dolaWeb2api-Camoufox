@@ -328,3 +328,23 @@ def test_models_catalog_and_account_update_api(tmp_path):
     assert bad_proxy.status_code == 400
     missing_acc = tc.post("/admin/api/login-sessions/start", json={"mode": "manage", "account_id": "nope"})
     assert missing_acc.status_code == 404
+
+def test_dola_710022002_high_demand_classified_as_transient_rate_limit():
+    from doubao2api.upstream_errors import parse_upstream_error
+
+    high_demand = parse_upstream_error(
+        {
+            "error_code": 710022002,
+            "error_msg": "We are experiencing high demand right now. Please try again later.",
+            "extra": {"ack": "1"},
+        }
+    )
+    assert high_demand.category == "rate_limit"
+    assert high_demand.status_code == 429
+    assert high_demand.retry_after_seconds == 45.0
+
+    # Bare 710022002 or explicit verify signal remains verification (503)
+    bare = parse_upstream_error({"error_code": 710022002})
+    assert bare.category == "verification"
+    assert bare.status_code == 503
+
