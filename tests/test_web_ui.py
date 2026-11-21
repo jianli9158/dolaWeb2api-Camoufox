@@ -23,9 +23,9 @@ def test_web_ui_routes():
     resp = client.get("/admin")
     assert resp.status_code == 200
     assert "text/html" in resp.headers["content-type"]
-    assert "Doubao 2API 控制台" in resp.text
+    assert "Dola 2API 控制台" in resp.text
     assert "apiBaseUrl" in resp.text
-    assert "纯净免窗口扫码登录" in resp.text
+    assert "Web LiveView" in resp.text
 
     # 4. Health
     resp = client.get("/health")
@@ -37,6 +37,8 @@ def test_web_ui_routes():
     data = resp.json()
     assert "data" in data
     model_ids = [m["id"] for m in data["data"]]
+    assert "dola" in model_ids
+    assert "dola-think" in model_ids
     assert "doubao-2.1-turbo" in model_ids
     assert "doubao-think" in model_ids
 
@@ -47,7 +49,7 @@ def test_web_ui_with_api_key():
     # Admin dashboard should render (allows entering key in UI)
     resp = client.get("/admin")
     assert resp.status_code == 200
-    assert "Doubao 2API 控制台" in resp.text
+    assert "Dola 2API 控制台" in resp.text
 
     # System API without key should be 401
     resp = client.get("/admin/api/system")
@@ -70,26 +72,22 @@ def test_web_ui_with_api_key():
 
 
 @pytest.mark.parametrize(
-    "switch_result,page_present,page_closed,expected_status",
+    "switch_result,alive_result,expected_status",
     [
-        (False, True, False, 503),
-        (True, False, False, 503),
-        (True, True, True, 503),
-        (True, True, False, 200),
+        (False, True, 503),
+        (True, False, 503),
+        (True, True, 200),
     ],
 )
-def test_force_window_reports_managed_page_result(
-    tmp_path, switch_result, page_present, page_closed, expected_status
+def test_force_window_reports_managed_camoufox_result(
+    tmp_path, switch_result, alive_result, expected_status
 ):
     browser = BrowserClient(headless=True, user_data_dir=str(tmp_path))
     browser._ready = True
     if switch_result:
         browser.headless = False
     browser.switch_mode = AsyncMock(return_value=switch_result)
-    page = MagicMock()
-    page.is_closed.return_value = page_closed
-    page.bring_to_front = AsyncMock()
-    browser._page = page if page_present else None
+    browser.is_alive = AsyncMock(return_value=alive_result)
 
     with TestClient(create_app(browser_client=browser)) as client:
         response = client.post("/admin/api/browser/force-window")
@@ -97,12 +95,10 @@ def test_force_window_reports_managed_page_result(
     assert response.status_code == expected_status
     if expected_status == 200:
         assert response.json()["status"] == "ok"
-        page.bring_to_front.assert_awaited_once()
+        assert "Camoufox" in response.json()["browser_name"]
     else:
         assert response.json()["status"] == "error"
-        assert response.json()["detail"] == "Managed browser window is unavailable"
-        if page_present:
-            page.bring_to_front.assert_not_awaited()
+        assert "Managed browser window is unavailable" in response.json()["detail"]
 
 
 def test_force_window_requires_admin_authentication(tmp_path):

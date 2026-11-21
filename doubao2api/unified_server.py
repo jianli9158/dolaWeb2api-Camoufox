@@ -1,11 +1,15 @@
 """
-Unified API server for Doubao (Playwright browser-based).
+Unified API server for Dola International (Camoufox + native WebDriver BiDi).
 
 Exposes OpenAI-compatible endpoints:
   POST /v1/chat/completions     (chat, streaming & non-streaming)
   GET  /v1/models               (list available models)
+  POST /v1/images/generations   (text-to-image / img2img)
+  POST /v1/images/edits         (image editing)
+  POST /v1/video/generations    (text/image-to-video)
+  POST /v1/audio/generations    (music generation)
   GET  /health                  (health check)
-  GET  /auth                    (QR login page)
+  GET  /admin                   (Admin console + Web LiveView remote browser)
 
 Start with:
     python -m doubao2api
@@ -32,17 +36,28 @@ except Exception:
     pass
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from .account_manager import AccountManager
+from pathlib import Path
 from .browser_client import BrowserClient, VideoQuotaExceeded
 from .browser_operation import BrowserOperationGate, BrowserOperationMiddleware
+from .camoufox_fingerprint import ensure_camoufox_executable
+from .camoufox_login import DolaLoginManager, persist_isolated_profile_artifacts
+from .dola_config import (
+    DOLA_ACCOUNT_INFO_URL,
+    DOLA_CHAT_URL,
+    DOLA_URL,
+    DOLA_WEB_AID,
+    get_default_profile_dir,
+    get_env,
+)
+from .proxy_utils import mask_proxy_url, normalize_proxy_url
+from .redaction import redact_sensitive_text
 from .upstream_errors import UpstreamAPIError, UpstreamError, parse_upstream_error
-
-
 def is_safe_url(url: str) -> bool:
     """
     Validate that the URL is safe to fetch (prevents SSRF).
@@ -98,19 +113,26 @@ from .tool_calling import (
 )
 from .token_counter import count_tokens, count_messages_tokens, SAFETY_FACTOR
 
-log = logging.getLogger("doubao_unified")
+log = logging.getLogger("dola_unified")
 
 # ── Auto-delete ephemeral conversations (即用即焚 / Scheme B) ──
-_auto_delete_conv = os.environ.get("DOUBAO_AUTO_DELETE_CONV", "true").lower() in ("true", "1", "yes")
+_auto_delete_conv = get_env("DOLA_AUTO_DELETE_CONV", "DOUBAO_AUTO_DELETE_CONV", "true").lower() in ("true", "1", "yes")
 
-# ── Request Dispatch Smoothing (avoids burst rate-limiting from translation plugins) ──
+# ── Request Dispatch Smoothing ──
 _dispatch_lock = asyncio.Lock()
 _last_dispatch_time: float = 0.0
-_MIN_DISPATCH_INTERVAL = float(os.environ.get("DOUBAO_MIN_INTERVAL", "0.2"))  # 200ms
+_MIN_DISPATCH_INTERVAL = float(get_env("DOLA_MIN_INTERVAL", "DOUBAO_MIN_INTERVAL", "0.2"))
 
-# ── Model definitions & Aliases ──────────────────────────────
+# ── Model definitions & Aliases (Dola International + backward-compatible aliases) ──
 
 CHAT_MODELS: Dict[str, int] = {
+    # Primary Dola International models
+    "dola": 0,
+    "dola-pro": 0,
+    "dola-turbo": 0,
+    "dola-think": 1,
+    "dola-expert": 3,
+    # Legacy Doubao model names kept for drop-in client compatibility
     "doubao-2.1-turbo": 0,
     "doubao-2.1-pro": 0,
     "doubao-2.1": 0,
@@ -123,46 +145,54 @@ CHAT_MODELS: Dict[str, int] = {
 
 MODEL_ALIASES: Dict[str, str] = {
     # OpenAI Chat models
-    "gpt-4o": "doubao-2.1-turbo",
-    "gpt-4o-mini": "doubao",
-    "gpt-4": "doubao-2.1-pro",
-    "gpt-4-turbo": "doubao-2.1-pro",
-    "gpt-3.5-turbo": "doubao",
-    "text-davinci-003": "doubao",
+    "gpt-4o": "dola",
+    "gpt-4o-mini": "dola",
+    "gpt-4": "dola-pro",
+    "gpt-4-turbo": "dola-pro",
+    "gpt-3.5-turbo": "dola",
+    "text-davinci-003": "dola",
     # Claude models
-    "claude-3-5-sonnet": "doubao-2.1-turbo",
-    "claude-3-5-sonnet-20241022": "doubao-2.1-turbo",
-    "claude-3-opus": "doubao-2.1-pro",
-    "claude-3-haiku": "doubao",
+    "claude-3-5-sonnet": "dola-pro",
+    "claude-3-5-sonnet-20241022": "dola-pro",
+    "claude-3-opus": "dola-pro",
+    "claude-3-haiku": "dola",
     # DeepSeek models
-    "deepseek-chat": "doubao-2.1",
-    "deepseek-v3": "doubao-2.1",
-    "deepseek-reasoner": "doubao-think",
-    "deepseek-r1": "doubao-think",
+    "deepseek-chat": "dola-pro",
+    "deepseek-v3": "dola-pro",
+    "deepseek-reasoner": "dola-think",
+    "deepseek-r1": "dola-think",
     # OpenAI Reasoning models
-    "o1": "doubao-think",
-    "o1-mini": "doubao-think",
-    "o1-preview": "doubao-think",
-    "o3-mini": "doubao-think",
-    # Image models
-    "dall-e-3": "doubao-image",
-    "dall-e-2": "doubao-image",
+    "o1": "dola-think",
+    "o1-mini": "dola-think",
+    "o1-preview": "dola-think",
+    "o3-mini": "dola-think",
+    # Image / Video / Music models
+    "dall-e-3": "seedream-4.5",
+    "dall-e-2": "seedream-4.5",
+    "gpt-image-1": "seedream-5.0-pro",
+    "doubao-image": "seedream-4.5",
+    "doubao-video": "seedance-2.0-fast",
+    "doubao-music": "dola-music",
 }
 
-DEFAULT_FALLBACK_MODEL = os.environ.get("DOUBAO_DEFAULT_MODEL", "doubao-2.1-turbo")
+DEFAULT_FALLBACK_MODEL = get_env("DOLA_DEFAULT_MODEL", "DOUBAO_DEFAULT_MODEL", "dola")
 
 ALL_MODELS = [
-    {"id": m, "object": "model", "owned_by": "doubao", "created": 0}
+    {"id": m, "object": "model", "owned_by": "dola", "created": 0}
     for m in CHAT_MODELS
 ] + [
-    {"id": m, "object": "model", "owned_by": "doubao-alias", "created": 0}
+    {"id": m, "object": "model", "owned_by": "dola-alias", "created": 0}
     for m in MODEL_ALIASES
 ] + [
-    {"id": "doubao-image", "object": "model", "owned_by": "doubao", "created": 0},
-    {"id": "doubao-music", "object": "model", "owned_by": "doubao", "created": 0},
-    {"id": "doubao-video", "object": "model", "owned_by": "doubao", "created": 0},
+    {"id": "dola-image", "object": "model", "owned_by": "dola", "created": 0},
+    {"id": "seedream-4.5", "object": "model", "owned_by": "dola", "created": 0},
+    {"id": "seedream-5.0-pro", "object": "model", "owned_by": "dola", "created": 0},
+    {"id": "dola-video", "object": "model", "owned_by": "dola", "created": 0},
+    {"id": "seedance-2.0-fast", "object": "model", "owned_by": "dola", "created": 0},
+    {"id": "seedance-2.0", "object": "model", "owned_by": "dola", "created": 0},
+    {"id": "seedance-1.0", "object": "model", "owned_by": "dola", "created": 0},
+    {"id": "dola-music", "object": "model", "owned_by": "dola", "created": 0},
 ]
-
 # ── Recent Media Buffer (P2: Gallery) ────────────────────────
 from collections import deque
 _recent_media: deque = deque(maxlen=30)
@@ -384,15 +414,29 @@ def create_app(
     _conversation_account_ids: Dict[str, str] = {}
     _resource_account_ids: Dict[str, str] = {}
 
+    _login_manager = DolaLoginManager()
+
     async def _browser_watchdog():
-        """Background task: check browser health, auto-detect login, auto-restart on crash, auto-heal captcha."""
+        """Background task: keep headless runtime healthy ONLY when accounts exist and no manage session holds the profile."""
         consecutive_dead = 0
         while True:
             client = _browser.get("client")
-            sleep_time = 10 if (client and client.is_ready and not client.needs_captcha) else 2
+            sleep_time = 10 if (client and client.is_ready and not client.needs_captcha) else 3
             await asyncio.sleep(sleep_time)
 
             if client is None:
+                continue
+            am = getattr(client, "account_manager", None)
+            if not am or not am.accounts:
+                consecutive_dead = 0
+                continue
+            # Pause watchdog while an interactive manage session holds the active account's profile lock
+            active_id = am.active_account_id
+            if any(
+                s.get("mode") == "manage" and s.get("account_id") == active_id
+                for s in _login_manager.list_active()
+            ):
+                consecutive_dead = 0
                 continue
             try:
                 async with client.operation_gate.lease():
@@ -401,7 +445,7 @@ def create_app(
                         consecutive_dead += 1
                         log.warning("Browser watchdog: health check failed (%d/3)", consecutive_dead)
                         if consecutive_dead >= 3:
-                            log.error("Browser watchdog: process dead 3 consecutive checks, auto-relaunching window...")
+                            log.warning("Browser watchdog: restarting headless Camoufox for active account %s...", active_id)
                             await client.restart()
                             consecutive_dead = 0
                     else:
@@ -411,45 +455,54 @@ def create_app(
                             if client.is_ready:
                                 log.info("Browser client logged in successfully! sessionid confirmed.")
             except Exception as e:
-                log.error("Browser watchdog error: %s", e)
+                log.error("Browser watchdog error: %s", redact_sensitive_text(str(e)))
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         if browser_client is not None:
             yield
+            await _login_manager.close_all()
             return
 
-        # Ensure browser_client logs are visible
         logging.getLogger("doubao2api.browser_client").setLevel(logging.INFO)
         logging.getLogger("doubao2api.browser_client").addHandler(logging.StreamHandler())
+        logging.getLogger("doubao2api.camoufox_login").setLevel(logging.INFO)
+        logging.getLogger("doubao2api.camoufox_login").addHandler(logging.StreamHandler())
 
-        # Start browser client (auto-resolves headless mode from DOUBAO_HEADLESS)
-        user_data_dir = os.environ.get(
-            "DOUBAO_BROWSER_DATA",
-            os.path.join(os.path.expanduser("~"), ".doubao_browser"),
-        )
+        # Always instantiate in headless mode by default (never auto-pop a browser window on startup)
+        user_data_dir = get_default_profile_dir()
         client = BrowserClient(headless=None, user_data_dir=user_data_dir)
         _browser["client"] = client
         _browser["startup_error"] = None
 
-        try:
-            await client.start()
-            if client.is_ready:
-                log.info("Browser client ready (already logged in)")
-            else:
-                log.warning(
-                    "Browser not logged in. Visit /admin to scan QR code or import cookies."
-                )
-        except Exception as e:
-            log.error("Browser client failed to start: %s", e)
-            _browser["startup_error"] = str(e)
+        lazy_start = get_env("DOLA_LAZY_START", None, "false").strip().lower() in ("true", "1", "yes")
+        if client.account_manager.accounts and not lazy_start:
+            try:
+                await client.start()
+                if client.is_ready:
+                    log.info(
+                        "Dola headless Camoufox ready for isolated account '%s'",
+                        client.account_manager.active_account_id,
+                    )
+                else:
+                    log.warning(
+                        "Active Dola account session needs re-login. Open /admin -> 管理资料 to refresh."
+                    )
+            except Exception as e:
+                safe_err = redact_sensitive_text(str(e))
+                log.error("Camoufox client failed to start: %s", safe_err)
+                _browser["startup_error"] = safe_err
+        else:
+            log.info(
+                "Dola2API started in idle mode (accounts=%d, no browser auto-launched). "
+                "Open /admin and click '浏览器登录新增账号' to add an isolated account.",
+                len(client.account_manager.accounts),
+            )
 
-        # Start browser watchdog
         watchdog_task = asyncio.create_task(_browser_watchdog())
 
-        # Auto open admin dashboard in default browser
-        if os.environ.get("DOUBAO_AUTO_OPEN", "true").lower() == "true":
-            server_port = int(os.environ.get("DOUBAO_PORT", "9090"))
+        if get_env("DOLA_AUTO_OPEN", "DOUBAO_AUTO_OPEN", "false").lower() == "true":
+            server_port = int(get_env("DOLA_PORT", "DOUBAO_PORT", "9090"))
             async def _auto_open():
                 await asyncio.sleep(1.5)
                 try:
@@ -461,16 +514,16 @@ def create_app(
 
         yield
 
-        # Shutdown
         watchdog_task.cancel()
+        await _login_manager.close_all()
         client = _browser.pop("client", None)
         if client:
             try:
-                await client.stop()
+                await client.close()
             except Exception:
                 pass
 
-    app = FastAPI(title="Doubao API", version="1.0.0", lifespan=lifespan)
+    app = FastAPI(title="dolaWeb2api-Camoufox", version="2.0.0", lifespan=lifespan)
 
     @app.exception_handler(UpstreamAPIError)
     async def _upstream_exc(request: Request, exc: UpstreamAPIError):
@@ -492,9 +545,14 @@ def create_app(
         log.exception("Unhandled exception")
         return JSONResponse(
             status_code=500,
-            content={"error": {"message": str(exc), "type": "internal_error", "code": 500}},
+            content={
+                "error": {
+                    "message": redact_sensitive_text(str(exc)),
+                    "type": "internal_error",
+                    "code": 500,
+                }
+            },
         )
-
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -516,6 +574,7 @@ def create_app(
             "/auth/eval", "/auth/screenshot", "/auth/status", "/admin/api/status",
             "/admin/api/browser/status", "/admin/api/browser/mode", "/admin/api/browser/screenshot",
             "/admin/api/browser/force-window", "/admin/api/browser/install-chromium",
+            "/admin/api/browser/install-camoufox", "/admin/api/config/proxy",
         },
     )
 
@@ -1065,6 +1124,32 @@ def create_app(
                 verification_required=error.category == "verification",
                 error_category=error.category,
             )
+        manager = client.account_manager if isinstance(client.account_manager, AccountManager) else None
+        current_acc = manager.get_active_account() if manager else None
+
+        if error.category == "rate_limit":
+            if manager and current_acc:
+                manager.mark_cooldown(
+                    current_acc.id,
+                    feature=feature,
+                    seconds=error.retry_after_seconds or 60.0,
+                )
+            next_acc = (
+                manager.get_next_available_account(feature)
+                if manager and allow_account_switch else None
+            )
+            if next_acc and (not current_acc or next_acc.id != current_acc.id):
+                try:
+                    switched = await client.switch_to_account(next_acc.id)
+                except Exception as exc:
+                    log.warning("Account switch on rate limit failed (%s)", type(exc).__name__)
+                    switched = False
+                if switched:
+                    return "account_switch"
+                if current_acc:
+                    manager.set_active_account(current_acc.id)
+            return None
+
         if error.category != "verification":
             return None
 
@@ -1076,8 +1161,6 @@ def create_app(
             except Exception as exc:
                 log.warning("Captcha auto-solver failed (%s)", type(exc).__name__)
 
-        manager = client.account_manager if isinstance(client.account_manager, AccountManager) else None
-        current_acc = manager.get_active_account() if manager else None
         if manager and current_acc:
             manager.mark_captcha_required(current_acc.id)
         next_acc = (
@@ -1516,6 +1599,8 @@ def create_app(
         elif not _auto_delete_conv:
             gen_kwargs["memory_type"] = 0
 
+        if body.model and body.model not in ("doubao-image", "dola-image"):
+            gen_kwargs["model"] = body.model
         try:
             result = await client.generate_image(
                 prompt=body.prompt,
@@ -1743,6 +1828,8 @@ def create_app(
         content_type = request.headers.get("content-type", "")
         prompt = ""
         ratio = None
+        model = None
+        duration = None
         ref_image_key = None
 
         save_history = None
@@ -1755,6 +1842,12 @@ def create_app(
             form = await request.form()
             prompt = str(form.get("prompt", "")).strip()
             ratio = form.get("ratio") or form.get("size")
+            model = form.get("model")
+            if form.get("duration") is not None:
+                try:
+                    duration = int(str(form.get("duration")).rstrip("sS"))
+                except ValueError:
+                    pass
             raw_keys = form.getlist("ref_image_keys") or form.getlist("ref_image_key")
             for rk in raw_keys:
                 if isinstance(rk, str):
@@ -1777,6 +1870,12 @@ def create_app(
             body = await request.json()
             prompt = str(body.get("prompt", "")).strip()
             ratio = body.get("ratio") or body.get("size")
+            model = body.get("model")
+            if body.get("duration") is not None:
+                try:
+                    duration = int(str(body.get("duration")).rstrip("sS"))
+                except ValueError:
+                    pass
             raw_keys = body.get("ref_image_keys") or body.get("ref_image_key")
             if isinstance(raw_keys, str):
                 for k in raw_keys.split(","):
@@ -1801,10 +1900,8 @@ def create_app(
                     image_items.extend(val)
                 elif val:
                     image_items.append(val)
-
         if not prompt:
             raise HTTPException(status_code=400, detail="Missing prompt")
-
         bound_resource_ids = [
             key for item in ref_image_keys + image_items
             if (key := _tos_resource_id(item)) is not None
@@ -1852,6 +1949,10 @@ def create_app(
             call_kwargs = dict(history_kwargs)
             if len(ref_image_keys) > 1:
                 call_kwargs["ref_image_keys"] = list(ref_image_keys)
+            if model:
+                call_kwargs["model"] = model
+            if duration is not None:
+                call_kwargs["duration"] = duration
             try:
                 result = await client.generate_video(
                     prompt=prompt,
@@ -2706,30 +2807,35 @@ def create_app(
 
     @app.get("/admin/api/system")
     async def admin_system(request: Request):
-        """Return system information."""
+        """Return system and Dola Camoufox runtime information."""
         _check_auth(request)
         import platform
         import sys
         uptime = int(time.time() - _SERVER_START_TIME)
+        client = _browser.get("client")
         return JSONResponse({
             "python_version": sys.version,
             "platform": platform.platform(),
             "uptime_seconds": uptime,
             "rpm_limit": rpm_limit,
-            "host": os.environ.get("DOUBAO_HOST", "0.0.0.0"),
-            "port": int(os.environ.get("DOUBAO_PORT", "9090")),
+            "host": get_env("DOLA_HOST", "DOUBAO_HOST", "0.0.0.0"),
+            "port": int(get_env("DOLA_PORT", "DOUBAO_PORT", "9090")),
+            "edition": "dola",
+            "site_url": DOLA_URL,
+            "browser_engine": "camoufox-bidi",
+            "proxy_masked": mask_proxy_url(getattr(client, "proxy_url", None)) if client else "",
             "models": {
                 "chat": list(CHAT_MODELS.keys()),
-                "image": ["doubao-image"],
-                "video": ["doubao-video"],
-                "audio": ["doubao-music"],
+                "image": ["seedream-4.5", "seedream-5.0-pro", "dola-image", "doubao-image"],
+                "video": ["seedance-2.0-fast", "seedance-2.0", "seedance-1.0", "dola-video", "doubao-video"],
+                "audio": ["dola-music", "doubao-music"],
             },
             "auto_delete_conv": _auto_delete_conv,
         })
 
     @app.post("/admin/api/config/auto-delete")
     async def admin_toggle_auto_delete(request: Request):
-        """Toggle or set auto_delete_conv mode (即用即焚 / 阅后即焚) at runtime."""
+        """Toggle or set auto_delete_conv mode (ephemeral conversations) at runtime."""
         _check_auth(request)
         global _auto_delete_conv
         try:
@@ -2740,9 +2846,44 @@ def create_app(
             _auto_delete_conv = bool(body["enabled"])
         else:
             _auto_delete_conv = not _auto_delete_conv
-        os.environ["DOUBAO_AUTO_DELETE_CONV"] = "true" if _auto_delete_conv else "false"
+        val = "true" if _auto_delete_conv else "false"
+        os.environ["DOLA_AUTO_DELETE_CONV"] = val
+        os.environ["DOUBAO_AUTO_DELETE_CONV"] = val
         log.info("Runtime auto_delete_conv toggled to: %s", _auto_delete_conv)
         return JSONResponse({"status": "ok", "auto_delete_conv": _auto_delete_conv})
+
+    @app.get("/admin/api/config/proxy")
+    async def admin_get_proxy(request: Request):
+        """Return current upstream proxy configuration (password masked)."""
+        _check_auth(request)
+        client = _browser.get("client")
+        proxy_url = getattr(client, "proxy_url", None) if client else None
+        return JSONResponse({
+            "enabled": bool(proxy_url),
+            "proxy_masked": mask_proxy_url(proxy_url),
+        })
+
+    @app.post("/admin/api/config/proxy")
+    async def admin_set_proxy(request: Request):
+        """Set or clear upstream HTTP/HTTPS/SOCKS5 proxy and apply to Camoufox relay."""
+        _check_auth(request)
+        client = _browser.get("client")
+        if client is None:
+            raise HTTPException(status_code=503, detail="Browser not initialized")
+        body = await request.json()
+        raw_proxy = str(body.get("proxy_url") or "").strip()
+        try:
+            normalized = normalize_proxy_url(raw_proxy) if raw_proxy else None
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        os.environ["DOLA_PROXY"] = normalized or ""
+        if hasattr(client, "set_proxy"):
+            await client.set_proxy(normalized)
+        return JSONResponse({
+            "status": "ok",
+            "enabled": bool(normalized),
+            "proxy_masked": mask_proxy_url(normalized),
+        })
 
     @app.get("/admin/api/logs")
     async def admin_logs(request: Request):
@@ -2752,13 +2893,13 @@ def create_app(
 
     @app.get("/admin/api/cookies")
     async def admin_cookies(request: Request):
-        """Return current browser cookies (masked for security)."""
+        """Return current Dola browser cookies (masked for security)."""
         _check_auth(request)
         client = _browser.get("client")
-        if client is None or client._context is None:
+        if client is None:
             return JSONResponse({"cookies": [], "total": 0})
         try:
-            cookies = await client._context.cookies("https://www.doubao.com")
+            cookies = await client.get_cookies() if hasattr(client, "get_cookies") else []
             cookies_list = [
                 {
                     "name": c["name"],
@@ -2769,11 +2910,11 @@ def create_app(
                     "masked": (c["value"][:3] + "..." + c["value"][-3:]) if len(c.get("value", "")) > 6 else "***",
                 }
                 for c in cookies
+                if not c.get("domain") or "dola.com" in c.get("domain", "")
             ]
             return JSONResponse({"cookies": cookies_list, "total": len(cookies_list)})
         except Exception:
             return JSONResponse({"cookies": [], "total": 0})
-
     def _parse_cookie_payload(raw: Any) -> Dict[str, str]:
         """Parse various cookie input formats into a clean {name: value} dict.
 
@@ -2869,15 +3010,25 @@ def create_app(
             am = AccountManager()
 
         body = await request.json()
-        name = str(body.get("name", "")).strip() or "新账号"
+        name = str(body.get("name", "")).strip() or "New Dola Account"
         raw = body.get("cookies", "")
         cookie_dict = _parse_cookie_payload(raw)
 
         if not cookie_dict:
-            raise HTTPException(status_code=400, detail="未提供有效 Cookie 或 sessionid")
+            raise HTTPException(status_code=400, detail="Valid cookies or sessionid required")
+
+        raw_proxy = body.get("proxy_url")
+        norm_proxy = None
+        if raw_proxy:
+            try:
+                norm_proxy = normalize_proxy_url(str(raw_proxy))
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         account_id = body.get("account_id")
-        acc = am.add_or_update_account(name=name, cookies=cookie_dict, account_id=account_id)
+        acc = am.add_or_update_account(
+            name=name, cookies=cookie_dict, account_id=account_id, proxy_url=norm_proxy
+        )
         return JSONResponse({
             "status": "ok",
             "account": acc.to_dict(mask_cookies=True),
@@ -2885,23 +3036,27 @@ def create_app(
 
     @app.post("/admin/api/accounts/save_current")
     async def admin_accounts_save_current(request: Request):
-        """Save current active browser session as a named account in the pool."""
+        """Save current active Dola Camoufox session as a named account in the pool."""
         _check_auth(request)
         client = _browser.get("client")
-        if client is None or not client._context:
-            raise HTTPException(status_code=503, detail="浏览器尚未运行或未就绪")
+        if client is None or not hasattr(client, "get_cookies"):
+            raise HTTPException(status_code=503, detail="Browser not running or not ready")
 
         body = await request.json()
-        name = str(body.get("name", "")).strip() or f"已保存会话-{int(time.time()) % 10000}"
+        name = str(body.get("name", "")).strip() or f"Dola-{int(time.time()) % 10000}"
 
         try:
-            cookies = await client._context.cookies("https://www.doubao.com")
-            cookie_dict = {c["name"]: c["value"] for c in cookies}
+            cookies = await client.get_cookies()
+            cookie_dict = {
+                c["name"]: c["value"]
+                for c in cookies
+                if c.get("name") and c.get("value") and (not c.get("domain") or "dola.com" in c.get("domain", ""))
+            }
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"获取浏览器 Cookie 失败: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to read browser cookies: {redact_sensitive_text(str(e))}")
 
-        if not cookie_dict or "sessionid" not in cookie_dict:
-            raise HTTPException(status_code=400, detail="当前浏览器未检测到已登录的 sessionid")
+        if not any(k in cookie_dict for k in ("sessionid", "sessionid_ss", "sid_tt")):
+            raise HTTPException(status_code=400, detail="No authenticated Dola session cookie detected")
 
         am = getattr(client, "account_manager", None)
         if am is None:
@@ -2915,7 +3070,6 @@ def create_app(
             "status": "ok",
             "account": acc.to_dict(mask_cookies=True),
         })
-
     @app.post("/admin/api/accounts/switch")
     async def admin_accounts_switch(request: Request):
         """Manually switch active account in the browser."""
@@ -2942,9 +3096,43 @@ def create_app(
             "logged_in": client.is_ready,
         })
 
+    @app.put("/admin/api/accounts/{account_id}")
+    async def admin_accounts_update(account_id: str, request: Request):
+        """Update account name and/or per-account proxy_url."""
+        _check_auth(request)
+        client = _browser.get("client")
+        am = getattr(client, "account_manager", None)
+        if am is None:
+            from .account_manager import AccountManager
+            am = AccountManager()
+        acc = am.get_account(account_id)
+        if not acc:
+            raise HTTPException(status_code=404, detail="Account not found")
+        body = await request.json()
+        name = body.get("name")
+        raw_proxy = body.get("proxy_url")
+        clear_proxy = bool(body.get("clear_proxy")) or (raw_proxy == "")
+        old_proxy = acc.proxy_url
+        try:
+            updated = am.update_account(
+                account_id,
+                name=name if isinstance(name, str) else None,
+                proxy_url=raw_proxy if (isinstance(raw_proxy, str) and raw_proxy.strip()) else None,
+                clear_proxy=clear_proxy,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        if client and am.active_account_id == account_id and updated and updated.proxy_url != old_proxy:
+            if await client.is_alive():
+                asyncio.create_task(client.restart())
+        return JSONResponse({
+            "status": "ok",
+            "account": updated.to_dict(mask_cookies=True) if updated else None,
+        })
+
     @app.post("/admin/api/accounts/delete")
     async def admin_accounts_delete(request: Request):
-        """Delete an account from the pool."""
+        """Delete an account from the pool and optionally clean its isolated profile directory."""
         _check_auth(request)
         client = _browser.get("client")
         am = getattr(client, "account_manager", None)
@@ -2954,12 +3142,18 @@ def create_app(
 
         body = await request.json()
         account_id = body.get("account_id")
+        delete_profile = bool(body.get("delete_profile", True))
         if not account_id:
             raise HTTPException(status_code=400, detail="Missing account_id")
 
-        ok = am.delete_account(account_id)
-        return JSONResponse({"status": "ok" if ok else "not_found", "deleted": ok})
+        if client and hasattr(client, "release_if_account") and am.active_account_id == account_id:
+            try:
+                await client.release_if_account(account_id)
+            except Exception:
+                pass
 
+        ok = am.delete_account(account_id, delete_profile=delete_profile)
+        return JSONResponse({"status": "ok" if ok else "not_found", "deleted": ok})
     @app.post("/admin/api/accounts/strategy")
     async def admin_accounts_strategy(request: Request):
         """Set rotation strategy (failover / round_robin)."""
@@ -3027,55 +3221,81 @@ def create_app(
             am = AccountManager()
 
         results = []
-        async with httpx.AsyncClient(timeout=5.0) as http:
-            for acc in list(am.accounts.values()):
-                cookie_str = "; ".join(f"{k}={v}" for k, v in acc.cookies.items())
-                is_valid = False
-                err = ""
-                if client and client.is_ready and acc.id == am.active_account_id:
-                    is_valid = True
-                else:
-                    try:
+        default_proxy = getattr(client, "proxy_url", None) if client else None
+        for acc in list(am.accounts.values()):
+            cookie_str = "; ".join(f"{k}={v}" for k, v in acc.cookies.items())
+            is_valid = False
+            err = ""
+            if client and client.is_ready and acc.id == am.active_account_id:
+                is_valid = True
+            else:
+                acc_proxy = acc.proxy_url or default_proxy
+                client_kwargs: Dict[str, Any] = {"timeout": 8.0}
+                if acc_proxy:
+                    client_kwargs["proxy"] = acc_proxy
+                try:
+                    async with httpx.AsyncClient(**client_kwargs) as http:
                         headers = {
                             "Cookie": cookie_str,
-                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
-                            "Referer": "https://www.doubao.com/chat/",
+                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:152.0) Gecko/20100101 Firefox/152.0",
+                            "Referer": DOLA_CHAT_URL,
+                            "Accept-Language": "en-US,en;q=0.9",
                         }
-                        resp = await http.get("https://www.doubao.com/api/user/info", headers=headers)
+                        resp = await http.get(
+                            f"{DOLA_ACCOUNT_INFO_URL}?aid={DOLA_WEB_AID}&device_platform=web",
+                            headers=headers,
+                        )
                         if resp.status_code == 200:
                             data = resp.json()
-                            if data.get("code") == 0 or data.get("data", {}).get("user_id"):
+                            info = data.get("data") or {}
+                            if data.get("message") == "success" and info.get("user_id"):
                                 is_valid = True
                             else:
-                                err = data.get("msg") or "Session expired"
-                        elif "sessionid" in acc.cookies and len(acc.cookies["sessionid"]) >= 16:
+                                err = info.get("description") or data.get("message") or "Session expired"
+                        elif any(len(acc.cookies.get(k, "")) >= 16 for k in ("sessionid", "sessionid_ss", "sid_tt")):
                             is_valid = True
                         else:
                             err = f"HTTP {resp.status_code}"
-                    except Exception as e:
-                        if "sessionid" in acc.cookies and len(acc.cookies["sessionid"]) >= 16:
-                            is_valid = True
-                        else:
-                            err = str(e)
+                except Exception as e:
+                    if any(len(acc.cookies.get(k, "")) >= 16 for k in ("sessionid", "sessionid_ss", "sid_tt")):
+                        is_valid = True
+                    else:
+                        err = redact_sensitive_text(str(e))
 
-                if acc.status in ("disabled", "captcha", "quota_exceeded"):
-                    status = acc.status
-                else:
-                    status = "active" if is_valid else "invalid"
-                am.update_account_status(acc.id, status)
-                results.append({
-                    "id": acc.id,
-                    "name": acc.name,
-                    "status": status,
-                    "valid": is_valid,
-                    "error": err,
-                })
+            if acc.status in ("disabled", "captcha", "quota_exceeded"):
+                status = acc.status
+            else:
+                status = "active" if is_valid else "invalid"
+            am.update_account_status(acc.id, status)
+            results.append({
+                "id": acc.id,
+                "name": acc.name,
+                "status": status,
+                "valid": is_valid,
+                "error": err,
+            })
 
         return JSONResponse({
             "status": "ok",
             "results": results,
             "accounts": am.list_accounts(mask_cookies=True),
         })
+
+    @app.post("/admin/api/accounts/clear_cooldown")
+    async def admin_clear_account_cooldown(request: Request):
+        """Clear active capability cooldowns for an account."""
+        _check_auth(request)
+        client = _browser.get("client")
+        am = getattr(client, "account_manager", None)
+        if am is None:
+            from .account_manager import AccountManager
+            am = AccountManager()
+        body = await request.json()
+        account_id = body.get("account_id")
+        if not account_id:
+            raise HTTPException(status_code=400, detail="account_id is required")
+        ok = am.clear_cooldowns(account_id)
+        return JSONResponse({"status": "ok" if ok else "not_found", "accounts": am.list_accounts(mask_cookies=True)})
 
     @app.post("/admin/api/accounts/clear_captcha")
     async def admin_clear_account_captcha(request: Request):
@@ -3188,35 +3408,34 @@ def create_app(
         if client is None:
             return {"logged_in": False, "browser": "not_started"}
 
-        page_url = client.page.url if client.page else ""
-        login_btn_count = 0
+        page_url = await client.get_page_url() if hasattr(client, "get_page_url") else ""
         has_session = False
-        if client._context:
+        if hasattr(client, "get_cookies"):
             try:
-                cookies = await client._context.cookies("https://www.doubao.com")
-                has_session = any(c["name"] == "sessionid" and c.get("value") for c in cookies)
-            except Exception:
-                pass
-        if client.page:
-            try:
-                login_btn = client.page.locator('button:has-text("登录")')
-                login_btn_count = await login_btn.count()
+                cookies = await client.get_cookies()
+                has_session = any(
+                    c["name"] in ("sessionid", "sessionid_ss", "sid_tt")
+                    and c.get("value")
+                    and (not c.get("domain") or "dola.com" in c.get("domain", ""))
+                    for c in cookies
+                )
             except Exception:
                 pass
 
-        actual_logged_in = has_session or (client.is_ready and login_btn_count == 0)
-
+        actual_logged_in = bool(client.is_ready or has_session)
         return {
             "logged_in": actual_logged_in,
             "is_ready_flag": client.is_ready,
-            "login_button_visible": login_btn_count > 0,
+            "login_button_visible": not actual_logged_in,
             "page_url": page_url,
-            "device_id": client._device_id or "",
-            "web_id": client._web_id or "",
+            "device_id": getattr(client, "_device_id", "") or "",
+            "web_id": getattr(client, "_web_id", "") or "",
+            "region": getattr(client, "_region", "") or "",
             "headless": client.headless,
             "mode": "headless" if client.headless else "window",
             "needs_captcha": client.needs_captcha,
-            "browser_name": getattr(client, "browser_name", "chromium"),
+            "browser_name": getattr(client, "browser_name", "Camoufox (WebDriver BiDi)"),
+            "proxy_masked": mask_proxy_url(getattr(client, "proxy_url", None)),
         }
 
     @app.get("/admin/api/browser/status")
@@ -3226,26 +3445,26 @@ def create_app(
 
     @app.post("/admin/api/browser/mode")
     async def admin_browser_set_mode(request: Request):
-        """Dynamically switch browser mode between headless and windowed GUI."""
+        """Dynamically switch Camoufox mode between headless and windowed GUI."""
         _check_auth(request)
         client = _browser.get("client")
         if client is None:
             raise HTTPException(status_code=503, detail="Browser client not initialized")
         body = await request.json()
         target_headless = bool(body.get("headless", False))
-        log.info("API request: switch browser mode to headless=%s", target_headless)
+        log.info("API request: switch Camoufox mode to headless=%s", target_headless)
         ok = await client.switch_mode(target_headless)
         return {
             "status": "ok" if ok else "failed",
             "headless": client.headless,
             "mode": "headless" if client.headless else "window",
             "logged_in": client.is_ready,
-            "browser_name": getattr(client, "browser_name", "chromium"),
+            "browser_name": getattr(client, "browser_name", "Camoufox (WebDriver BiDi)"),
         }
 
     @app.post("/auth/eval")
     async def auth_eval(request: Request):
-        """Evaluate JS on the browser page (debug/dev only)."""
+        """Evaluate JS on the Camoufox page (debug/dev only)."""
         _check_auth(request)
         is_dev = os.environ.get("DEV_MODE", "false").lower() in ("true", "1", "yes") or \
                  os.environ.get("DEBUG", "false").lower() in ("true", "1", "yes")
@@ -3255,40 +3474,351 @@ def create_app(
                 detail="The /auth/eval endpoint is disabled in production. Set DEV_MODE=true or DEBUG=true to enable.",
             )
         client = _browser.get("client")
-        if client is None or client.page is None:
+        if client is None or not hasattr(client, "evaluate"):
             raise HTTPException(status_code=503, detail="Browser not available")
         body = await request.json()
         js = body.get("js", "")
         if not js:
             raise HTTPException(status_code=400, detail="Missing 'js' field")
         try:
-            result = await client.page.evaluate(js)
+            result = await client.evaluate(js)
             return {"result": result}
         except Exception as e:
-            return {"error": str(e)}
+            return {"error": redact_sensitive_text(str(e))}
 
     @app.get("/auth/screenshot")
     async def auth_screenshot(request: Request):
-        """Return a screenshot of the browser page (for remote QR viewing)."""
+        """Return a PNG screenshot of the Camoufox page."""
         _check_auth(request)
         client = _browser.get("client")
-        if client is None or client.page is None:
+        if client is None or not hasattr(client, "screenshot"):
             raise HTTPException(status_code=503, detail="Browser not available")
-        png_bytes = await client.page.screenshot()
+        png_bytes = await client.screenshot(image_format="png")
         from fastapi.responses import Response
         return Response(content=png_bytes, media_type="image/png")
 
-    # ── QR Login (pure HTTP, no VNC needed) ──
+    # ── Web LiveView (Interactive Remote Browser over WebDriver BiDi) ──
+
+    @app.get("/admin/api/liveview/snapshot")
+    async def admin_liveview_snapshot(request: Request):
+        """Return latest Camoufox LiveView frame snapshot & metadata."""
+        _check_auth(request)
+        client = _browser.get("client")
+        if client is None or not getattr(client, "liveview", None):
+            raise HTTPException(status_code=503, detail="Camoufox LiveView not initialized")
+        return JSONResponse(client.liveview.snapshot(include_frame=True))
+
+    @app.post("/admin/api/liveview/input")
+    async def admin_liveview_input(request: Request):
+        """Forward pointer/wheel/key/text/navigate/reload event to Camoufox LiveView."""
+        _check_auth(request)
+        client = _browser.get("client")
+        if client is None or not getattr(client, "liveview", None):
+            raise HTTPException(status_code=503, detail="Camoufox LiveView not initialized")
+        body = await request.json()
+        client.liveview.enqueue_input(body)
+        return JSONResponse({"status": "ok"})
+
+    @app.post("/admin/api/liveview/check-login")
+    async def admin_liveview_check_login(request: Request):
+        """Re-check Dola login state immediately after interactive LiveView sign-in."""
+        _check_auth(request)
+        client = _browser.get("client")
+        if client is None:
+            raise HTTPException(status_code=503, detail="Browser not initialized")
+        if hasattr(client, "_check_login_state"):
+            await client._check_login_state()
+        return await _get_login_status(request)
+
+    @app.websocket("/admin/api/liveview/ws")
+    async def admin_liveview_ws(websocket: WebSocket):
+        """Bidirectional WebSocket streaming Camoufox JPEG frames and interactive input events."""
+        if api_key and api_key != "any":
+            auth = websocket.headers.get("authorization", "")
+            token = auth[7:].strip() if auth.startswith("Bearer ") else ""
+            if not token:
+                token = websocket.headers.get("x-api-key", "").strip()
+            if not token:
+                token = websocket.query_params.get("token", "").strip()
+            if token != api_key:
+                await websocket.close(code=4401)
+                return
+
+        client = _browser.get("client")
+        liveview = getattr(client, "liveview", None) if client else None
+        if liveview is None:
+            await websocket.close(code=1013)
+            return
+
+        await websocket.accept()
+        sub = liveview.add_subscriber(websocket)
+        last_seq = -1
+        last_dialog_seq = -1
+
+        async def _sender():
+            nonlocal last_seq, last_dialog_seq
+            while True:
+                snap = liveview.snapshot(include_frame=True)
+                if snap["frame_seq"] != last_seq or snap["dialog_seq"] != last_dialog_seq:
+                    last_seq = snap["frame_seq"]
+                    last_dialog_seq = snap["dialog_seq"]
+                    await websocket.send_json(snap)
+                await asyncio.sleep(0.18)
+
+        sender_task = asyncio.create_task(_sender())
+        try:
+            while True:
+                msg = await websocket.receive_json()
+                if isinstance(msg, dict):
+                    if msg.get("type") == "check_login" and hasattr(client, "_check_login_state"):
+                        await client._check_login_state()
+                    else:
+                        liveview.enqueue_input(msg)
+        except (WebSocketDisconnect, Exception):
+            pass
+        finally:
+            sender_task.cancel()
+            try:
+                await sender_task
+            except BaseException:
+                pass
+            liveview.remove_subscriber(sub)
+
+    # ── Isolated Browser Login & Per-Account Profile Management Sessions (flow2api-Camoufox) ──
+
+    @app.post("/admin/api/login-sessions/start")
+    async def admin_login_session_start(request: Request):
+        """Start an isolated Camoufox browser session for adding a new account (clean profile + chosen proxy)
+        or managing an existing account's isolated profile."""
+        _check_auth(request)
+        client = _browser.get("client")
+        am = getattr(client, "account_manager", None)
+        if am is None:
+            from .account_manager import AccountManager
+            am = AccountManager(storage_dir=getattr(client, "user_data_dir", get_default_profile_dir()))
+            if client is not None:
+                client.account_manager = am
+
+        body = await request.json()
+        mode = str(body.get("mode") or "add").strip().lower()
+        if mode not in ("add", "manage"):
+            raise HTTPException(status_code=400, detail="mode must be 'add' or 'manage'")
+
+        account_id = str(body.get("account_id") or "").strip() or None
+        account_name = str(body.get("name") or "").strip()
+        raw_proxy = str(body.get("proxy_url") or "").strip()
+        headless = bool(body.get("headless", True))
+
+        if raw_proxy:
+            try:
+                effective_proxy = normalize_proxy_url(raw_proxy)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+        else:
+            effective_proxy = None
+
+        if mode == "manage":
+            if not account_id:
+                raise HTTPException(status_code=400, detail="account_id is required for manage mode")
+            acc = am.get_account(account_id)
+            if not acc:
+                raise HTTPException(status_code=404, detail=f"Account not found: {account_id}")
+            if not account_name:
+                account_name = acc.name
+            if not effective_proxy:
+                effective_proxy = acc.proxy_url or (getattr(client, "proxy_url", None) if client else None)
+        else:
+            if not effective_proxy and client:
+                effective_proxy = getattr(client, "proxy_url", None)
+
+        user_data_root = Path(getattr(client, "user_data_dir", get_default_profile_dir()))
+
+        async def _release_runtime(target_acc_id: str) -> None:
+            if client and hasattr(client, "release_if_account"):
+                await client.release_if_account(target_acc_id)
+
+        async def _on_complete(sess, exported: Dict[str, Any]) -> Dict[str, Any]:
+            cookies = exported.get("cookies") or {}
+            identity = exported.get("identity") or {}
+            src_dir = Path(exported.get("source_work_dir") or "")
+            detected_name = str(identity.get("display_name") or "").strip()
+            region = str(identity.get("region") or "").strip()
+            device_id = str(identity.get("device_id") or "").strip()
+
+            if sess.mode == "add":
+                new_id = f"acc_{uuid.uuid4().hex[:8]}"
+                target_dir = Path(am.resolve_account_dir(new_id))
+                if src_dir.exists() and src_dir.resolve() != target_dir.resolve():
+                    await asyncio.to_thread(persist_isolated_profile_artifacts, src_dir, target_dir)
+                final_name = sess.account_name or detected_name or f"Dola-{len(am.accounts) + 1}"
+                acc_obj = am.add_or_update_account(
+                    name=final_name,
+                    cookies=cookies,
+                    account_id=new_id,
+                    proxy_url=sess.proxy_url,
+                    profile_dir=f"accounts/{new_id}",
+                    region=region,
+                    device_id=device_id,
+                )
+                # Activate and warm headless runtime if this is the first account or runtime isn't ready
+                if client and (not client.is_ready or len(am.accounts) == 1):
+                    am.set_active_account(acc_obj.id)
+                    asyncio.create_task(client.restart())
+                return {"action": "added", "account": acc_obj.to_dict(mask_cookies=True)}
+
+            # mode == "manage"
+            acc_obj = am.add_or_update_account(
+                name=sess.account_name or detected_name or "",
+                cookies=cookies,
+                account_id=sess.account_id,
+                proxy_url=sess.proxy_url if raw_proxy else None,
+                region=region or None,
+                device_id=device_id or None,
+            )
+            am.clear_captcha_status(acc_obj.id)
+            am.clear_cooldowns(acc_obj.id)
+            if client and am.active_account_id == acc_obj.id:
+                asyncio.create_task(client.restart())
+            return {"action": "updated", "account": acc_obj.to_dict(mask_cookies=True)}
+
+        sess = _login_manager.create_session(
+            user_data_root=user_data_root,
+            mode=mode,
+            account_id=account_id,
+            account_name=account_name,
+            proxy_url=effective_proxy,
+            headless=headless,
+            on_complete=_on_complete,
+            on_release_runtime=_release_runtime,
+        )
+        return JSONResponse({"status": "ok", **sess.to_dict(include_frame=False)})
+
+    @app.get("/admin/api/login-sessions")
+    async def admin_login_sessions_list(request: Request):
+        _check_auth(request)
+        return JSONResponse({"sessions": _login_manager.list_active()})
+
+    @app.get("/admin/api/login-sessions/{session_id}/status")
+    async def admin_login_session_status(session_id: str, request: Request):
+        _check_auth(request)
+        sess = _login_manager.get(session_id)
+        if not sess:
+            raise HTTPException(status_code=404, detail="Login session not found")
+        include_frame = request.query_params.get("include_frame", "false").lower() in ("true", "1", "yes")
+        return JSONResponse(sess.to_dict(include_frame=include_frame))
+
+    @app.post("/admin/api/login-sessions/{session_id}/input")
+    async def admin_login_session_input(session_id: str, request: Request):
+        _check_auth(request)
+        sess = _login_manager.get(session_id)
+        if not sess:
+            raise HTTPException(status_code=404, detail="Login session not found")
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Input payload must be a JSON object")
+        sess.liveview.enqueue_input(payload)
+        return JSONResponse({"status": "ok"})
+
+    @app.post("/admin/api/login-sessions/{session_id}/save")
+    async def admin_login_session_save(session_id: str, request: Request):
+        _check_auth(request)
+        sess = _login_manager.get(session_id)
+        if not sess:
+            raise HTTPException(status_code=404, detail="Login session not found")
+        sess.request_save()
+        return JSONResponse({"status": "ok", "session_id": session_id})
+
+    @app.post("/admin/api/login-sessions/{session_id}/cancel")
+    async def admin_login_session_cancel(session_id: str, request: Request):
+        _check_auth(request)
+        sess = _login_manager.get(session_id)
+        if not sess:
+            raise HTTPException(status_code=404, detail="Login session not found")
+        sess.request_cancel()
+        return JSONResponse({"status": "ok", "session_id": session_id})
+
+    @app.websocket("/admin/api/login-sessions/{session_id}/ws")
+    async def admin_login_session_ws(session_id: str, websocket: WebSocket):
+        """Bidirectional LiveView WebSocket for an isolated add-account or manage-account Camoufox session."""
+        if api_key and api_key != "any":
+            auth = websocket.headers.get("authorization", "")
+            token = auth[7:].strip() if auth.startswith("Bearer ") else ""
+            if not token:
+                token = websocket.headers.get("x-api-key", "").strip()
+            if not token:
+                token = websocket.query_params.get("token", "").strip()
+            if token != api_key:
+                await websocket.close(code=4401)
+                return
+
+        sess = _login_manager.get(session_id)
+        if not sess:
+            await websocket.close(code=4404)
+            return
+
+        await websocket.accept()
+        sub = sess.liveview.add_subscriber(websocket)
+        last_seq = -1
+        last_dialog_seq = -1
+        last_status = ""
+
+        async def _sender():
+            nonlocal last_seq, last_dialog_seq, last_status
+            while True:
+                snap = sess.liveview.snapshot(include_frame=True)
+                status_key = f"{sess.status}:{sess.logged_in_detected}:{sess.message}"
+                if (
+                    snap["frame_seq"] != last_seq
+                    or snap["dialog_seq"] != last_dialog_seq
+                    or status_key != last_status
+                ):
+                    last_seq = snap["frame_seq"]
+                    last_dialog_seq = snap["dialog_seq"]
+                    last_status = status_key
+                    payload = dict(snap)
+                    payload["session_status"] = sess.status
+                    payload["session_message"] = sess.message
+                    payload["logged_in_detected"] = sess.logged_in_detected
+                    if sess.result is not None:
+                        payload["result"] = sess.result
+                    if sess.error is not None:
+                        payload["error"] = sess.error
+                    await websocket.send_json(payload)
+                    if sess.status in ("completed", "cancelled", "error"):
+                        break
+                await asyncio.sleep(0.18)
+
+        sender_task = asyncio.create_task(_sender())
+        try:
+            while True:
+                msg = await websocket.receive_json()
+                if isinstance(msg, dict):
+                    mtype = msg.get("type")
+                    if mtype == "save":
+                        sess.request_save()
+                    elif mtype == "cancel":
+                        sess.request_cancel()
+                    else:
+                        sess.liveview.enqueue_input(msg)
+        except (WebSocketDisconnect, Exception):
+            pass
+        finally:
+            sender_task.cancel()
+            try:
+                await sender_task
+            except BaseException:
+                pass
+            sess.liveview.remove_subscriber(sub)
+    # ── QR Login (Dola / Lark App QR via pure HTTP) ──
 
     _qr_login_state: Dict[str, Any] = {}
 
     @app.post("/v1/session/qr-login")
     async def session_qr_login_start(request: Request):
-        """Start QR login flow. Returns base64 QR code PNG."""
+        """Start Dola QR login flow. Returns base64 QR code PNG."""
         _check_auth(request)
         from .qr_login import QRLogin, QRStatus
 
-        # Cancel any existing login
         if _qr_login_state.get("instance"):
             _qr_login_state["instance"].cancel()
 
@@ -3309,7 +3839,6 @@ def create_app(
             if result.status == QRStatus.CONFIRMED:
                 _qr_login_state["status"] = "success"
                 _qr_login_state["cookies"] = result.cookies
-                # Inject cookies into Playwright browser
                 client = _browser.get("client")
                 if client:
                     loop.call_soon_threadsafe(
@@ -3317,14 +3846,13 @@ def create_app(
                             _inject_qr_cookies(client, result.cookies)
                         )
                     )
-                log.info("QR login success: %d cookies", len(result.cookies))
+                log.info("Dola QR login success: %d cookies", len(result.cookies))
             else:
                 _qr_login_state["status"] = "failed"
                 _qr_login_state["error"] = result.error
 
         qr.start(on_status=on_status, on_done=on_done)
 
-        # Wait briefly for QR code to be generated
         for _ in range(20):
             await asyncio.sleep(0.1)
             if qr.qrcode_data:
@@ -3336,97 +3864,86 @@ def create_app(
             return JSONResponse({
                 "status": "qr_ready",
                 "qr_image_base64": qr_b64,
-                "message": "请用豆包 App 扫码。轮询 GET /v1/session/qr-login 获取状态。",
+                "message": "Scan with Dola or Lark app. Poll GET /v1/session/qr-login for status.",
             })
-        else:
-            return JSONResponse({
-                "status": _qr_login_state.get("status", "error"),
-                "error": _qr_login_state.get("error", "生成二维码失败"),
-            }, status_code=502)
+        return JSONResponse({
+            "status": _qr_login_state.get("status", "error"),
+            "error": _qr_login_state.get("error", "Failed to fetch QR code"),
+        }, status_code=502)
 
     @app.get("/v1/session/qr-login")
     async def session_qr_login_poll(request: Request):
-        """Poll QR login status."""
+        """Poll Dola QR login status."""
         _check_auth(request)
         status = _qr_login_state.get("status", "idle")
         resp: Dict[str, Any] = {"status": status}
-
         if status == "success":
-            resp["message"] = "登录成功，session 已更新"
+            resp["message"] = "Login succeeded; Camoufox session updated"
             resp["cookies_count"] = len(_qr_login_state.get("cookies", {}))
         elif status == "failed":
-            resp["error"] = _qr_login_state.get("error", "未知错误")
+            resp["error"] = _qr_login_state.get("error", "Unknown error")
         elif status == "idle":
-            resp["message"] = "无进行中的登录。POST /v1/session/qr-login 开始。"
-
+            resp["message"] = "No active QR login. POST /v1/session/qr-login to start."
         return JSONResponse(resp)
 
     async def _inject_qr_cookies(client: BrowserClient, cookies: Dict[str, str]):
-        """Inject QR login cookies into Playwright and verify."""
+        """Inject QR login cookies into Camoufox and verify."""
         try:
             ok = await client.inject_cookies_and_reload(cookies)
-            if ok:
-                log.info("QR cookies injected successfully, browser is ready")
-                _qr_login_state["browser_ready"] = True
-            else:
-                log.warning("QR cookies injected but login check failed")
-                _qr_login_state["browser_ready"] = False
+            _qr_login_state["browser_ready"] = bool(ok)
         except Exception as e:
-            log.error("Failed to inject QR cookies: %s", e)
+            log.error("Failed to inject QR cookies: %s", redact_sensitive_text(str(e)))
             _qr_login_state["browser_ready"] = False
 
     @app.get("/admin/api/browser/screenshot")
     async def admin_browser_screenshot(request: Request):
-        """Return screenshot of browser page as PNG."""
+        """Return screenshot of Camoufox page as PNG."""
         _check_auth(request)
         from fastapi.responses import Response
         client = _browser.get("client")
-        if client is None or client.page is None:
+        if client is None or not hasattr(client, "screenshot"):
             raise HTTPException(status_code=503, detail="Browser not initialized")
         try:
-            buf = await client.page.screenshot(type="png")
+            buf = await client.screenshot(image_format="png")
             return Response(content=buf, media_type="image/png")
         except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+            raise HTTPException(status_code=500, detail=redact_sensitive_text(str(e)))
 
+    @app.post("/admin/api/open-dola")
     @app.post("/admin/api/open-doubao")
-    async def admin_open_doubao(request: Request):
-        """Open doubao.com in system default browser for user login."""
+    async def admin_open_dola(request: Request):
+        """Open https://www.dola.com/chat/ in system default browser."""
         _check_auth(request)
         import webbrowser
         try:
-            webbrowser.open("https://www.doubao.com/chat/")
-            return {"status": "ok", "url": "https://www.doubao.com/chat/"}
+            webbrowser.open(DOLA_CHAT_URL)
+            return {"status": "ok", "url": DOLA_CHAT_URL}
         except Exception as e:
             return {"status": "error", "detail": str(e)}
 
     @app.post("/admin/api/browser/force-window")
     async def admin_browser_force_window(request: Request):
-        """Force launch or bring up the visible browser window."""
+        """Force launch visible Camoufox desktop window (or advise Web LiveView on headless servers)."""
         _check_auth(request)
         client = _browser.get("client")
         if client is None:
             raise HTTPException(status_code=503, detail="Browser not initialized")
         try:
             switched = await client.switch_mode(headless=False)
-            page = client.page
-            if not switched or page is None or page.is_closed():
+            alive = await client.is_alive() if hasattr(client, "is_alive") else switched
+            if not switched or not alive:
                 return JSONResponse(
                     status_code=503,
-                    content={"status": "error", "detail": "Managed browser window is unavailable"},
+                    content={"status": "error", "detail": "Managed browser window is unavailable; use Web LiveView in /admin"},
                 )
-            await page.bring_to_front()
-            # Click login button if not logged in and modal not open.
-            if not client.is_ready:
-                try:
-                    modal = page.locator('[role="dialog"], .semi-modal')
-                    if await modal.count() == 0:
-                        btn = page.locator('button:has-text("登录")')
-                        if await btn.count() > 0 and await btn.first.is_visible():
-                            await btn.first.click()
-                except Exception:
-                    pass
-            return {"status": "ok", "mode": "window", "headless": client.headless, "browser_name": getattr(client, "browser_name", "chromium")}
+            if not client.is_ready and hasattr(client, "_trigger_login_dialog"):
+                await client._trigger_login_dialog()
+            return {
+                "status": "ok",
+                "mode": "window",
+                "headless": client.headless,
+                "browser_name": getattr(client, "browser_name", "Camoufox (WebDriver BiDi)"),
+            }
         except Exception as e:
             log.error("Failed to force window (%s)", type(e).__name__)
             return JSONResponse(
@@ -3434,29 +3951,18 @@ def create_app(
                 content={"status": "error", "detail": "Managed browser window is unavailable"},
             )
 
+    @app.post("/admin/api/browser/install-camoufox")
     @app.post("/admin/api/browser/install-chromium")
-    async def admin_install_chromium(request: Request):
-        """Download and install official Playwright universal Chromium browser."""
+    async def admin_install_camoufox(request: Request):
+        """Locate or download native Camoufox browser binary."""
         _check_auth(request)
-        import subprocess, sys
         try:
-            proc = await asyncio.to_thread(
-                subprocess.run,
-                [sys.executable, "-m", "playwright", "install", "chromium"],
-                capture_output=True,
-                text=True,
-                timeout=300
-            )
-            if proc.returncode == 0:
-                return {"status": "ok", "message": "Playwright 通用独立 Chromium 安装成功！"}
-            else:
-                return {"status": "error", "message": proc.stderr or "安装失败"}
+            exe = await ensure_camoufox_executable()
+            return {"status": "ok", "executable": exe, "message": f"Camoufox ready at {exe}"}
         except Exception as e:
-            return {"status": "error", "message": str(e)}
+            return {"status": "error", "message": redact_sensitive_text(str(e))}
 
     return app
-
-
 
 
 # ── Server runner ──
@@ -3470,77 +3976,46 @@ def _is_port_in_use(port: int, host: str = "127.0.0.1") -> bool:
 
 
 def run_server():
-    """Start the uvicorn server with env-based configuration."""
+    """Start the uvicorn server with DOLA_* / DOUBAO_* env configuration."""
     import uvicorn
 
-    host = os.environ.get("DOUBAO_HOST", "0.0.0.0")
-    port = int(os.environ.get("DOUBAO_PORT", "9090"))
-    api_key = os.environ.get("DOUBAO_API_KEY", "")
-    rpm = float(os.environ.get("DOUBAO_RPM_LIMIT", "20"))
+    host = get_env("DOLA_HOST", "DOUBAO_HOST", "0.0.0.0")
+    port = int(get_env("DOLA_PORT", "DOUBAO_PORT", "9090"))
+    api_key = get_env("DOLA_API_KEY", "DOUBAO_API_KEY", "")
+    rpm = float(get_env("DOLA_RPM_LIMIT", "DOUBAO_RPM_LIMIT", "20"))
 
-    # Port conflict detection and friendly self-healing
     if _is_port_in_use(port, "127.0.0.1"):
         import urllib.request
         try:
-            req = urllib.request.Request(f"http://127.0.0.1:{port}/health", headers={"User-Agent": "doubao2api-probe"})
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/health", headers={"User-Agent": "dola2api-probe"})
             with urllib.request.urlopen(req, timeout=2) as resp:
                 if resp.status == 200:
-                    print(f"\n" + "=" * 60)
-                    print(f"  [提示] doubao2api 服务已经在端口 {port} 上正常运行中！")
-                    print(f"  管理控制台: http://127.0.0.1:{port}/admin")
-                    print(f"  无需重复启动。如需彻底重启，请先运行 repair.bat 停止旧服务。")
-                    print(f"=" * 60 + "\n")
-                    import webbrowser
-                    webbrowser.open(f"http://127.0.0.1:{port}/admin")
+                    print("\n" + "=" * 60)
+                    print(f"  [Info] dolaWeb2api-Camoufox is already running on port {port}!")
+                    print(f"  Admin Console: http://127.0.0.1:{port}/admin")
+                    print("=" * 60 + "\n")
                     return
         except Exception:
             pass
-        print(f"\n[警告] 本地端口 {port} 已被其他程序占用，服务无法启动！")
-        print(f"请使用 repair.bat 清理残留进程，或通过环境变量 DOUBAO_PORT=xxxx 指定其他端口。\n")
+        print(f"\n[Warning] Port {port} is already in use. Set DOLA_PORT to choose another port.\n")
         return
 
-    # Security check: downgrade 0.0.0.0 to 127.0.0.1 if no API key is set
     allow_unprotected = os.environ.get("ALLOW_UNPROTECTED_BIND", "false").lower() in ("true", "1", "yes")
     if host == "0.0.0.0" and not api_key and not allow_unprotected:
         log.warning(
-            "SECURITY WARNING: DOUBAO_HOST is '0.0.0.0' but no DOUBAO_API_KEY is configured! "
-            "To prevent unauthorized external access, automatically downgrading host to '127.0.0.1'. "
-            "Set DOUBAO_API_KEY or set ALLOW_UNPROTECTED_BIND=true if you intentionally want public open access."
+            "SECURITY WARNING: HOST is '0.0.0.0' with no API key configured! "
+            "Downgrading bind host to '127.0.0.1'. Set DOLA_API_KEY or ALLOW_UNPROTECTED_BIND=true."
         )
         host = "127.0.0.1"
 
     app = create_app(api_key=api_key or None, rpm_limit=rpm)
 
-    print(f"\n  Doubao API Server (Playwright Native)")
+    print("\n  dolaWeb2api-Camoufox (Dola International · Native Camoufox WebDriver BiDi)")
+    print(f"  Target: {DOLA_URL}")
     print(f"  Listening on http://{host}:{port}")
-    print(f"  Admin page: http://{host}:{port}/admin")
+    print(f"  Admin & LiveView: http://{host}:{port}/admin")
     if api_key:
         print(f"  API Key: {api_key[:4]}{'*' * (len(api_key) - 4)}")
     print()
-
-    auto_open = os.environ.get("DOUBAO_AUTO_OPEN_BROWSER", "true").lower() in ("true", "1", "yes")
-    if auto_open:
-        def _open_browser_when_ready():
-            import time
-            import urllib.request
-            target_host = "127.0.0.1" if host in ("0.0.0.0", "") else host
-            admin_url = f"http://{target_host}:{port}/admin"
-            for _ in range(20):
-                time.sleep(0.5)
-                try:
-                    req = urllib.request.Request(
-                        f"http://{target_host}:{port}/health",
-                        headers={"User-Agent": "doubao2api-probe"},
-                    )
-                    with urllib.request.urlopen(req, timeout=1) as resp:
-                        if resp.status == 200:
-                            import webbrowser
-                            webbrowser.open(admin_url)
-                            break
-                except Exception:
-                    pass
-
-        import threading
-        threading.Thread(target=_open_browser_when_ready, daemon=True).start()
 
     uvicorn.run(app, host=host, port=port, log_level="info")

@@ -1,217 +1,178 @@
-# doubao2api
+# dolaWeb2api-Camoufox
 
-> 一个基于本地浏览器运行时的字节跳动豆包（Doubao）网页端 OpenAI 兼容 API 桥接服务。
-
----
-
-## 💡 项目由来与致谢
-
-本项目最初灵感来源于开源项目 [wangchuxiaoji-oss/doubao2api](https://github.com/wangchuxiaoji-oss/doubao2api)。原作者探索出了一套非常出色的豆包接口封装思路，让很多人能够在第三方客户端中使用豆包，在此对原作者的开源奉献表示由衷的感谢！
-
-随着豆包网页端架构和前端风控算法的持续更新，旧有的纯 HTTP 请求接口、前端签名和会话校验经常失效，维护纯逆向协议的成本极高。为了提供一个长期稳定的调用方案，本项目转变了实现思路：**借助本地浏览器（Playwright 控制 Chromium/Chrome/Edge）作为运行环境与会话载体，在其之上对外提供标准的 OpenAI 兼容 API。**
-
-这种方式将网页会话和请求签名交给本地浏览器处理，减少了直接维护网页协议的工作。服务可用性仍取决于豆包网页、账号状态、浏览器和本机环境。
+> 基于 **原生 Camoufox + 纯 Python WebDriver BiDi** 的 **Dola 国际版（`https://www.dola.com/`）** OpenAI 兼容 API 网关。  
+> 零 Playwright / Chromium 依赖，采用 `flow2api-Camoufox` 同源架构：**单账号独立隔离资料、每账号专属代理、Web LiveView 远程交互浏览器、Seedream 图像与 Seedance 视频模型支持**。
 
 ---
 
-## 🛠️ 当前已实现的功能
+## 核心特性
 
-**真实验收状态（2026-10-24）**：聊天、图生图、管理浏览器窗口入口及控制台错误展示已通过实机检查。多账号调度已通过自动回归，但尚未完成真实多账号验收；图生视频本次未返回视频结果，不能认定真实生成可用。#9 原始风控拦截未复现。详细证据见 [Issues 验收记录](docs/validation/2026-10-24-issues.md)。
+- **原生 Camoufox + WebDriver BiDi 引擎（零 Playwright）**
+  - 内置纯异步 WebDriver BiDi 协议客户端（`bidi_transport.py`），直接通过 `BiDiChannel`（`script.message`）在页面内执行带 `bdms.frontierSign` 签名的 `fetch()` 流式 SSE 对话，支持客户端断开自动 `AbortController.abort()`。
+  - 自动定位或下载原生 Camoufox 二进制文件，按账号持久化锁定 Windows Firefox 指纹、字体、WebGL 配置（`camoufox_fingerprint.py` + `camoufox_assets/`）。
+  - OS 内核级文件锁（`fcntl.flock` / `msvcrt.locking`）保护每个账号的 Profile，防止多进程并发损坏数据，并自动维护 `startupCache` 与冗余缓存清理（`camoufox_profile.py`）。
 
-- **OpenAI 兼容接口**：
-  - `/v1/chat/completions`：支持流式（Streaming）与非流式对话，支持多轮上下文。
-  - `/v1/models`：提供可用模型列表。
-  - `/v1/images/generations` & `/v1/images/edits`：文生图与**图生图**（支持参考图片 URL、Base64 或 Form 表单上传）。
-  - `/v1/video/generations`：视频及参考图视频接口已实现，**真实生成尚未验收通过**。
-  - `/v1/files` 与 `/v1/images/upload`：文件及图片上传接口。
-- **三种对话模式**：
-  - 常规模式（`doubao`）：响应速度快，适合日常翻译和简短问答。
-  - 思考模式（`doubao-think`）：附带完整的思维链（Reasoning Content）输出。
-  - 专家模式（`doubao-expert`）：深度推理模式，内置额度耗尽自动降级至思考模式的机制。
-- **多模态与文档理解**：
-  - 支持传入图片进行图文对话。
-  - 支持上传 PDF、TXT、Markdown、代码文件等多种文档并进行问答总结。
-- **即用即焚（无痕会话）**：
-  - 默认开启（`DOUBAO_AUTO_DELETE_CONV=true`）。API 响应完成后会自动清理网页端历史记录，避免大量接口调用污染你的豆包网页侧边栏。
-- **模型别名**：
-  - 内置常见第三方模型别名映射（`gpt-4o`、`gpt-3.5-turbo`、`deepseek-chat`、`deepseek-reasoner`、`dall-e-3` 等），第三方客户端导入后无需修改模型名即可直接请求。
-  - 对未识别的模型名，服务会尝试使用 `DOUBAO_DEFAULT_MODEL`（默认 `doubao-2.1-turbo`）；如果配置的模型无效或上游拒绝请求，仍可能返回错误。
-- **SSE 思考长连接保活心跳**：
-  - 深度思考（`doubao-think`）期间会定期发送 `: keep-alive\n\n` 心跳注释帧，帮助代理和客户端保持连接。
-- **多账号池与有限额度恢复**：
-  - 支持在控制台导入多个豆包账号 Cookie，集中管理。
-  - 单个浏览器承载所有账号操作。浏览器相关请求会串行执行，因此账号切换、上传、生成和管理操作可能等待当前操作结束。
-  - 当检测到支持恢复的错误时，系统会按调度策略有限地尝试其他可用账号。只有已成功恢复会话且请求尚未输出内容的符合条件的新对话才会重试；已开始输出或已有会话不会自动跨账号重放。
-  - 视频每日额度按功能记录。视频额度耗尽会跳过该账号的视频请求，不会因此禁用普通聊天或图片请求。
-- **验证码处理**：
-  - 系统可尝试识别并处理支持的验证码，也可尝试有限的账号恢复。验证码可能仍需人工处理，自动求解和账号切换都不保证成功。
-  - 控制台的 **「打开独立桌面浏览器窗口」** 会显示服务管理的浏览器页面，便于登录或手动完成验证。操作系统可能限制窗口前置；需要时请手动激活窗口。
-- **可视化管理面板与多媒体画廊（Admin Dashboard）**：
-  - 本地提供 Web 控制台（`http://127.0.0.1:9090/admin`），支持查看实时服务状态、请求日志、多账号池管理、扫码登录、常见客户端一键配置卡片以及**最近生成的图片/视频画廊**。
-- **Windows 本地友好**：
-  - 提供完整的一键启动、环境安装、日常更新、故障排查与**无黑窗静默启动**批处理/脚本，普通用户无需手动配置复杂环境。
+- **单账号完全隔离资料 & 统一多账号管理台（参考 `flow2api-Camoufox`）**
+  - **启动零弹窗**：服务启动时绝不自动弹出浏览器窗口；无账号时保持空闲，有账号时仅在后台无头运行活跃账号。
+  - **严格资料隔离**：每个账号拥有完全独立的隔离目录 `~/.dola_browser/accounts/<account_id>/`（独立 `firefox-profile/`、独立指纹、独立代理、独立锁），彻底杜绝多账号串号。
+  - **纯净新增账号（Web LiveView）**：在 `/admin` 点击 **「🌐 浏览器登录新增账号」** 时，可提前指定账号名与专属代理，系统会在全新临时目录 `_staging/login_<id>/` 启动纯净 Camoufox（零旧号 Cookie 残留），在网页内直接完成 Google / Lark / 邮箱登录并自动落盘至独立隔离目录。
+  - **单账号资料管理**：每个账号行提供 **「🖥️ 管理资料」** 按钮，自动释放运行时锁并以**该账号自己的隔离 Profile 与代理**打开远程交互浏览器，用于查看历史、重登或过人机验证。
+  - **多账号智能调度**：支持 **故障切换（Failover）** 与 **轮询调度（Round-Robin）**，内置按能力（`chat` / `image` / `video` / `global`）独立冷却退避与自动故障转移。
+
+- **全局与单账号代理支持（内置 `LocalSocks5Relay`）**
+  - 支持 `http://`、`https://`、`socks5://`、`socks5h://`、`user:pass@host:port`、`host:port:user:pass`、`st5 host:port:user:pass`。
+  - 带账号密码的代理与 SOCKS5H 代理自动经本地无认证 `LocalSocks5Relay` 透明转发给 Camoufox，同时透传至 `httpx`。
+  - 日志与错误响应自动对 `sessionid`、`sid_tt`、`msToken`、`a_bogus`、`Bearer` 及代理密码进行脱敏（`redaction.py`）。
+
+- **完整 OpenAI 兼容接口 & Dola 国际版模型**
+  - **对话 & 思维链**：`/v1/chat/completions`（流式 SSE / 非流式 / 多轮上下文 / 思维链 `reasoning_content` / 多模态图片识图 / Tool Calling）。
+  - **图像生成 & 编辑（Seedream）**：`/v1/images/generations`、`/v1/images/edits`、`/v1/images/upload`（通过 Dola 原生 `/chat/completion` `chat_ability.ability_type=3` 与海外新加坡 ImageX 上传）。
+  - **视频生成（Seedance）**：`/v1/video/generations`（通过 Dola 原生 `/chat/completion` `chat_ability.ability_type=17` 与 `/chat/async/chunk_stream` 异步拉流，支持 `5s` / `10s` 与多比例）。
+  - **即用即焚模式**：默认在 API 响应结束后自动调用 `/im/conversation/batch_del_user_conv` 删除临时对话，保持 Dola 账号侧边栏整洁（可在控制台顶栏或环境变量一键切换）。
 
 ---
 
-## 🚀 快速上手（Windows 推荐）
+## 支持的模型列表（`GET /v1/models`）
 
-如果你使用的是 Windows 10/11，推荐直接使用内置的一键脚本：
-
-1. **下载项目**：
-   - 点击 GitHub 页面绿色的 `Code` -> `Download ZIP` 下载源码并解压到本地（或者使用 `git clone`）。
-2. **一键启动**：
-   - 双击运行根目录下的 **`launcher.bat`**（**推荐，统一便捷管理中心**）。
-   - 你也可以直接双击 **`start_server.bat`**（前台带日志）或 **`run_silent.vbs`**（后台静默运行）。
-   - 首次运行时，脚本会自动调用 `install.bat` 为你创建虚拟环境 `.venv`、安装 Python 依赖并下载 Playwright 浏览器内核。
-   - 启动完成后，会在你的默认浏览器中自动打开管理控制台：`http://127.0.0.1:9090/admin`。
-3. **扫码登录**：
-   - 启动时会弹出一个豆包浏览器窗口，使用手机【豆包 App】扫码登录即可。
-   - 也可以在控制台点击“导入 Cookie”，将你在常规浏览器中已登录的豆包 Cookie 粘贴进去。
-   - 控制台状态显示为绿色的 `已登录` 后，服务即可正常接受 API 调用。
+| 类型 | 模型 ID | Dola 上游能力 / 模型 | 说明 |
+| :--- | :--- | :--- | :--- |
+| 对话 | `dola`（默认）、`dola-pro`、`dola-turbo` | 标准对话 | 快速响应、支持多模态图片识图与多轮上下文 |
+| 深度思考 | `dola-think` | Deep Think | 流式/非流式输出 `reasoning_content` 思维链 |
+| 专家模式 | `dola-expert` | Expert Mode | 复杂推理模式 |
+| 图像生成 | `seedream-4.5`（默认）、`seedream-5.0-pro`、`dola-image` | **Seedream 4.5** / **Seedream 5.0 Pro** | 支持 `ratio`（`auto`/`1:1`/`16:9`/`9:16`）与参考图编辑 |
+| 视频生成 | `seedance-2.0-fast`（默认）、`seedance-2.0`、`seedance-1.0`、`dola-video` | **Dreamina Seedance 2.0 Fast** / **Seedance 1.0** | 支持文生视频/图生视频、`ratio` 与 `duration`（`5`/`10` 秒） |
+| 兼容别名 | `doubao*`、`gpt-4o`、`claude-3-5-sonnet`、`deepseek-r1`、`dall-e-3`、`gpt-image-1` | 自动映射 | 兼容现有 OpenAI / Doubao 客户端无缝接入 |
 
 ---
 
-## 🧰 Windows 运维与启动说明
+## 快速开始
 
-根目录下提供了多个开箱即用的批处理脚本，**推荐优先使用 `launcher.bat`**：
+### 方式一：Docker Compose 部署（推荐）
 
-| 脚本文件 | 说明 | 适用场景 |
-|---|---|---|
-| **`launcher.bat`** | **统一管理中心 (推荐)** | **聚合控制台**。实时查看服务运行状态、开机自启状态，一键前台/后台启动、停止服务、生成桌面图标、设置开机自启、故障修复与更新。 |
-| **`start_server.bat`** | **前台启动** | 日常双击启动服务，自动激活虚拟环境、检测端口并自动打开管理页面（保留黑框显示实时日志）。 |
-| **`run_silent.vbs`** | **静默后台启动** | 双击后直接在后台静默运行，桌面上不保留任何黑框窗口，服务就绪后自动弹出管理网页。 |
-| **`install.bat`** | **环境初装** | 建立 Python 虚拟环境、配置清华镜像源加速并安装依赖与浏览器驱动。 |
-| **`repair.bat`** | **故障自愈** | 当遇到浏览器窗口打不开、端口被占用等异常时运行，可一键清理残留死锁与僵尸进程。 |
-| **`update.bat`** | **一键升级** | 自动通过 Git 拉取最新代码并同步更新依赖。 |
+```bash
+cp .env.example .env
+# 按需编辑 .env（建议生产环境配置 DOLA_API_KEY）
+docker compose up -d --build
+```
+
+启动后访问管理控制台：`http://<你的服务器IP>:9090/admin`，点击 **「🌐 浏览器登录新增账号」**，填写账号名和代理（可选），在内置 Web LiveView 画布中直接登录 Dola 即可使用，全程无需 VNC 或桌面环境。
+
+### 方式二：本地 Python 运行
+
+要求 Python `>= 3.10`：
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+
+cp .env.example .env
+python -m doubao2api
+# 或 pip install -e . 后直接运行:
+# dolaweb2api
+```
+
+打开浏览器访问 `http://127.0.0.1:9090/admin` 添加账号并测试 API。
 
 ---
 
-## 🔌 常用客户端配置指南
+## API 调用示例
 
-服务启动后，本地服务地址为 `http://127.0.0.1:9090/v1`。你可以把它接入各类支持自定义 OpenAI 接口的软件：
+### 1. 标准对话与深度思考（流式）
 
-### 1. 沉浸式翻译（Immersive Translate）
-- **翻译服务**：选择 `OpenAI`
-- **接口地址 (Base URL)**：`http://127.0.0.1:9090/v1`（注意末尾带有 `/v1`）
-- **API Key**：随意填写（未配置环境变量密码时，填任意非空字符串如 `sk-doubao` 即可）
-- **自定义模型**：`doubao`
+```bash
+curl http://127.0.0.1:9090/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $DOLA_API_KEY" \
+  -d '{
+    "model": "dola-think",
+    "stream": true,
+    "messages": [{"role": "user", "content": "What is 17 * 23?"}]
+  }'
+```
 
-### 2. Cherry Studio / NextChat / Chatbox
-- **模型提供商**：`OpenAI`
-- **API 地址 / Host**：`http://127.0.0.1:9090/v1`
-- **API Key**：随意填写（若配置了 `DOUBAO_API_KEY` 则填写对应的 Key）
-- **模型名称**：
-  - `doubao`：快速对话（默认）
-  - `doubao-think`：思考模式（输出思维链）
-  - `doubao-expert`：专家模式（深度推理）
-  - `doubao-image`：文生图
+### 2. 多模态视觉识图
 
-### 3. 图生图与图生视频调用示例
-- **图生图（OpenAI 标准 `/v1/images/edits` 端点）**：
-  ```bash
-  # 支持 Form 表单上传本地图片文件
-  curl http://127.0.0.1:9090/v1/images/edits \
-    -F "image=@photo.png" \
-    -F "prompt=将图片修改为赛博朋克风格"
-  ```
-  或者通过 JSON 直接传入图片远程 URL / Base64：
-  ```json
-  POST /v1/images/edits
-  {
-    "prompt": "将图片修改为水彩画风格",
-    "image": "https://example.com/cat.png"
-  }
-  ```
-- **图生视频（`/v1/video/generations` 端点）**：
-  ```json
-  POST /v1/video/generations
-  {
-    "prompt": "让画面动起来，微风吹拂树叶，镜头缓慢拉近",
-    "image": "https://example.com/forest.png",
+```bash
+curl http://127.0.0.1:9090/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "dola",
+    "messages": [{
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "Describe this image."},
+        {"type": "image_url", "image_url": {"url": "https://example.com/photo.png"}}
+      ]
+    }]
+  }'
+```
+
+### 3. Seedream 图像生成
+
+```bash
+curl http://127.0.0.1:9090/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "seedream-4.5",
+    "prompt": "A minimalist pastel sunrise over Mount Fuji",
     "ratio": "16:9"
-  }
-  ```
-
-### 4. 多账号池管理与额度自动切换
-豆包对单个账号的每日视频生成次数和高阶功能有配额上限。本项目内置多账号池（Account Pool）：
-- **进入控制台**：打开 `http://127.0.0.1:9090/admin`，切换到顶部的 **「账号池管理」** 标签页。
-- **添加账号**：
-  - 可以直接点击 **「将当前登录存为账号」** 将本地已登录的会话保存进账号池。
-  - 也可以点击 **「添加账号」**，粘贴其他豆包账号的 Cookie（JSON 数组格式或 `key=val;` 字符串格式均支持）。
-- **调度策略**：
-  - **故障转移模式（默认 `failover`）**：优先选择当前可用账号。遇到已识别的视频额度耗尽时，该账号会暂时跳过后续视频请求；新视频请求会按候选账号逐个尝试，每个账号至多一次。其他功能仍可选择视频额度已耗尽的账号。
-  - **轮询模式（`round_robin`）**：轮流使用可用账号，均匀分摊额度消耗。
-- **额度恢复**：每日额度标记会按账号管理器的日期重置，也可以在控制台手动重置。实际可用额度由豆包账号决定。
-
-浏览器会话一次只能使用一个账号。服务运行期间创建的会话 ID 会绑定到创建它的账号；如果后续请求切换到了其他账号，服务会返回 `409`，不会把已有会话自动搬到另一账号。无法识别归属的外部会话 ID 会沿用当前账号；服务重启后，内存中的会话归属记录也无法恢复。若账号切换时需要重新上传附件，服务只会使用本次请求保留的文件字节；仅有 TOS 等账号绑定引用而没有文件字节时，服务会返回明确错误（`409`），不会把旧引用交给另一个账号。
-
----
-
-## ⚙️ 环境变量配置
-
-如果需要自定义服务行为，可以在根目录创建 `.env` 文件或在系统环境变量中设置：
-
-| 环境变量 | 默认值 | 说明 |
-|---|---|---|
-| `DOUBAO_PORT` | `9090` | 本地服务监听端口 |
-| `DOUBAO_HOST` | `0.0.0.0` | 监听地址。**注意**：未设置 API Key 时，为防公网裸奔会自动降级为 `127.0.0.1` |
-| `DOUBAO_API_KEY` | (空) | 访问密钥。仅支持 HTTP Header（`Authorization: Bearer <key>`）传递，不支持 URL 传参 |
-| `DOUBAO_HEADLESS` | `auto` | 浏览器模式：`auto`（Windows 桌面默认有头方便首次登录，无界面环境自动无头）、`true`（强制无头）、`false`（强制有头） |
-| `DOUBAO_AUTO_DELETE_CONV` | `true` | 是否在请求完成后自动清理豆包云端临时对话（即用即焚） |
-| `DOUBAO_BROWSER_DATA` | `~/.doubao_browser` | 浏览器持久化配置目录（保存登录凭证与浏览器缓存） |
-| `DOUBAO_RPM_LIMIT` | `20` | 每分钟请求频率限制，避免并发过高触发风控 |
-| `ALLOW_UNPROTECTED_BIND` | `false` | 是否允许在未设置 API Key 的情况下将服务暴露到公网 `0.0.0.0` |
-
----
-
-## 📌 客观局限与注意事项
-
-为了避免不切实际的预期，这里实事求是地说明当前实现的客观局限：
-
-1. **资源占用**：
-   - 由于后台运行着一个真实的 Chromium/Chrome 实例，内存占用通常在 300MB ~ 800MB 之间，无法做到纯 HTTP 脚本那样几兆的轻量。
-2. **Tool Calling / Function Calling**：
-   - 豆包网页端模型**并不原生支持** OpenAI 格式的工具调用。本项目通过在 System Prompt 中注入规则并解析回复中的 XML/JSON 结构来实现模拟工具调用，适合轻度场景，不建议用于重度依赖精准工具调用的复杂 Agent。
-3. **多媒体生成限制**：
-   - 生成的图片带有豆包官方的水印（由字节服务端 CDN 模板渲染，无法绕过）。
-   - 视频生成受豆包账号每日免费额度限制。
-4. **风控验证码**：
-   - 若遇到调用异常，可能是触发了豆包的验证或登录检查。请在控制台使用 **「打开独立桌面浏览器窗口」**，完成手动验证后重新发起请求。恢复取决于上游网页和账号状态；必要时可在控制台明确重置拦截标记。
-5. **关于 Docker**：
-   - Docker 部署已移至 `experimental/docker/` 目录，归档为实验性支持。因为在无图形界面的服务器环境下扫码与验证码处理较为繁琐，更推荐在本地桌面环境直接运行。
-
----
-
-## 🧪 开发与测试
-
-安装运行依赖和 pytest：
-
-```bash
-pip install -e ".[test]"
-pytest
+  }'
 ```
 
-默认 `pytest` 会跳过标记为 `live` 的测试，不会主动请求运行中的 Doubao 服务。需要运行这些网络探测时，使用 `pytest -m live`，并为服务配置 `DOUBAO_BASE_URL`；部分探测会消耗账号额度。`tests/test_tool_reliability.py` 是手动压力脚本，运行时会连续发送请求并可能消耗额度：
+### 4. Seedance 视频生成
 
 ```bash
-python tests/test_tool_reliability.py --base-url http://127.0.0.1:9090
+curl http://127.0.0.1:9090/v1/video/generations \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "seedance-2.0-fast",
+    "prompt": "Gentle ocean waves glowing under golden sunset light",
+    "ratio": "16:9",
+    "duration": 5
+  }'
 ```
-
-浏览器流取消验收只访问本机启动的 HTTP fixture，不需要 Doubao 登录，也不消耗生成额度。它需要已安装的 Google Chrome 和项目依赖，可手动运行：
-
-```bash
-python tests/manual/browser_stream_acceptance.py
-```
-
-2026-10-24 的一次本机媒体验收中，图生图请求返回了一张有效 PNG；视频请求没有返回视频。因此这次只验证了图生图，未成功生成或验证视频。
-
-逐项结论、独立复测和剩余验证边界见 [Issues 验收记录](docs/validation/2026-10-24-issues.md)。
 
 ---
 
-## 📄 开源许可与免责声明
+## 环境变量说明
 
-- 本项目采用 [Apache-2.0 License](LICENSE) 开源协议。
-- 本项目仅供 Python 编程学习、浏览器自动化测试与个人学术研究使用。
-- 请勿将本项目用于任何商业营利、高并发滥用或恶意爬取行为。
-- 使用本项目过程中产生的一切后果由使用者自行承担，与本项目开发者无关。
+所有 `DOLA_*` 变量均向下兼容原有 `DOUBAO_*` 命名：
+
+| 变量名 | 默认值 | 说明 |
+| :--- | :--- | :--- |
+| `DOLA_HOST` | `0.0.0.0`（无 Key 时降级 `127.0.0.1`） | 监听地址（公网无 Key 需显式 `ALLOW_UNPROTECTED_BIND=true`） |
+| `DOLA_PORT` | `9090` | 监听端口 |
+| `DOLA_API_KEY` | 空 | 鉴权密钥（为空时不启用鉴权） |
+| `DOLA_HEADLESS` | `true` | 运行时无头模式（`true` 不弹出桌面窗口；`false` 弹出窗口） |
+| `DOLA_LAZY_START` | `false` | `true` 表示启动时不预热浏览器，按需拉起 |
+| `DOLA_PROXY` | 空 | 全局默认出口代理（单账号专属代理优先于全局配置） |
+| `DOLA_ACCOUNT_STRATEGY` | `failover` | 多账号调度策略：`failover` / `round_robin` |
+| `DOLA_BROWSER_DATA` | `~/.dola_browser` | 隔离账号资料根目录（子目录 `accounts/<account_id>/`） |
+| `CAMOUFOX_PATH` | 自动探测/下载 | 可选：手动指定已有 Camoufox 可执行文件路径 |
+| `DOLA_LOCALE` | `en-US` | Camoufox 指纹语言 |
+| `DOLA_TIMEZONE` | `America/New_York` | Camoufox 指纹时区 |
+| `DOLA_AUTO_DELETE_CONV` | `true` | `true` 开启即用即焚，自动删除临时对话 |
+| `DOLA_RPM_LIMIT` | `30` | 每分钟限流次数 |
+
+---
+
+## 测试与开发
+
+```bash
+pytest -q
+```
+
+默认自动化测试套件涵盖：
+- Dola 协议参数与 `bdms` 请求头、Seedream / Seedance `chat_ability` 载荷
+- WebDriver BiDi 编解码与 `BiDiChannel` 流取消、`LocalSocks5Relay`、OS 级 `ProfileLease`
+- 多账号隔离目录、单账号代理与分能力冷却退避、故障切换与回滚
+- 敏感凭证日志脱敏、Web LiveView 与隔离登录会话管理接口
+
+---
+
+## 致谢与声明
+
+- 浏览器运行时、隔离资料管理、Web LiveView 与代理中继架构参考 [flow2api-Camoufox](https://github.com/jianli9158/flow2api-Camoufox)。
+- 初版 OpenAI 协议桥接思路致谢开源社区 `doubao2api` 相关项目。
+- 本项目采用 [Apache-2.0 License](LICENSE) 开源协议，仅供编程学习、浏览器自动化与个人研究使用，请遵守目标平台服务条款。

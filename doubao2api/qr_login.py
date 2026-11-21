@@ -31,12 +31,14 @@ from urllib.parse import urljoin
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = "https://www.doubao.com"
-AID = 497858
+from .dola_config import DOLA_LOGIN_URL, DOLA_URL, DOLA_WEB_AID
 
-# Current Chrome version — keep in sync with client.py UA
+BASE_URL = DOLA_URL
+AID = DOLA_WEB_AID
+
+# Current Firefox/Chrome UA for Dola passport QR endpoints
 CHROME_VERSION = "148.0.0.0"
-CHROMIUM_BUILD = "148.0.7816.0"  # used by client.py _security_params
+CHROMIUM_BUILD = "148.0.7816.0"
 
 BASE_HEADERS = {
     "User-Agent": (
@@ -44,8 +46,9 @@ BASE_HEADERS = {
         f"(KHTML, like Gecko) Chrome/{CHROME_VERSION} Safari/537.36"
     ),
     "Accept": "application/json, text/plain, */*",
-    "Referer": "https://www.doubao.com/chat/login",
-    "Origin": "https://www.doubao.com",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": DOLA_LOGIN_URL,
+    "Origin": DOLA_URL,
 }
 
 
@@ -305,8 +308,8 @@ class QRLogin:
         self, csrf_token: str, session_cookies: Dict[str, str]
     ) -> Tuple[str, bytes]:
         """Fetch a QR code.  Returns ``(token, png_bytes)``."""
-        next_url = urllib.parse.quote("https://www.doubao.com", safe="")
-        url = f"{BASE_URL}/passport/web/get_qrcode/?next={next_url}&aid={AID}"
+        next_url = urllib.parse.quote(BASE_URL, safe="")
+        url = f"{BASE_URL}/passport/web/get_qrcode/?next={next_url}&aid={AID}&language=en"
 
         headers = dict(BASE_HEADERS)
         headers["x-tt-passport-csrf-token"] = csrf_token
@@ -358,10 +361,10 @@ class QRLogin:
                 result.error = "二维码已过期 (超时)"
                 return result
 
-            next_url = urllib.parse.quote("https://www.doubao.com", safe="")
+            next_url = urllib.parse.quote(BASE_URL, safe="")
             url = (
                 f"{BASE_URL}/passport/web/check_qrconnect/"
-                f"?next={next_url}&token={token}&aid={AID}"
+                f"?next={next_url}&token={token}&aid={AID}&language=en"
             )
 
             headers = dict(BASE_HEADERS)

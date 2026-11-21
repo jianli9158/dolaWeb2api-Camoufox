@@ -393,23 +393,30 @@ def test_video_empty_upstream_result_is_gateway_error_without_echoing_message(tm
 def test_browser_video_quota_payloads_raise_without_internal_failover(tmp_path, quota_branch):
     async def run():
         client, manager, accounts = _client_with_accounts(tmp_path, strategy="failover", count=2)
-        if quota_branch == "event":
-            event = {"event_type": 2005, "event_data": "今日生成次数已达上限"}
-        else:
-            content = json.dumps({"text": "今日生成次数已达上限"}, ensure_ascii=False)
-            event = {
-                "event_type": 2001,
-                "event_data": {
-                    "message": {"content_type": 2001, "content": content},
-                },
-            }
-        client._samantha_request = AsyncMock(return_value=f"data: {json.dumps(event, ensure_ascii=False)}\n\n")
+        calls = 0
+
+        async def fake_chat_completion(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if quota_branch == "event":
+                yield {"error": True, "status": 429, "body": "今日生成次数已达上限"}
+            else:
+                yield {
+                    "_event": "STREAM_MSG_NOTIFY",
+                    "content": {
+                        "content_block": [
+                            {"content": {"text_block": {"text": "今日生成次数已达上限"}}}
+                        ]
+                    },
+                }
+
+        client.chat_completion = fake_chat_completion
         client.switch_to_account = AsyncMock(return_value=True)
 
         with pytest.raises(VideoQuotaExceeded):
             await client.generate_video(prompt="no real call")
 
-        assert client._samantha_request.await_count == 1
+        assert calls == 1
         assert manager.get_account(accounts[0].id).video_quota_exceeded is True
         assert manager.get_account(accounts[0].id).status == "active"
         client.switch_to_account.assert_not_awaited()
@@ -516,10 +523,7 @@ def test_chat_recovery_reuploads_retained_image_and_file_bytes(tmp_path):
 def test_switch_failure_restores_prior_account_and_manager_identity(tmp_path):
     async def run():
         client, manager, accounts = _client_with_accounts(tmp_path, strategy="failover", count=2)
-        context = MagicMock()
-        context.clear_cookies = AsyncMock(return_value=None)
-        client._context = context
-        client._page = MagicMock()
+        client.clear_cookies = AsyncMock(return_value=None)
         client.is_alive = AsyncMock(return_value=True)
         client.switch_to_account = BrowserClient.switch_to_account.__get__(client, BrowserClient)
         client.inject_cookies_and_reload = AsyncMock(side_effect=[RuntimeError("target failed"), True])
@@ -531,18 +535,14 @@ def test_switch_failure_restores_prior_account_and_manager_identity(tmp_path):
         assert client.is_ready is True
         assert client.inject_cookies_and_reload.await_args_list[0].args[0] == accounts[1].cookies
         assert client.inject_cookies_and_reload.await_args_list[1].args[0] == accounts[0].cookies
-        assert context.clear_cookies.await_count == 2
-
+        assert client.clear_cookies.await_count == 2
     asyncio.run(run())
 
 
 def test_switch_clear_exception_marks_browser_not_ready_without_relabeling_account(tmp_path):
     async def run():
         client, manager, accounts = _client_with_accounts(tmp_path, strategy="failover", count=2)
-        context = MagicMock()
-        context.clear_cookies = AsyncMock(side_effect=RuntimeError("clear failed"))
-        client._context = context
-        client._page = MagicMock()
+        client.clear_cookies = AsyncMock(side_effect=RuntimeError("clear failed"))
         client.is_alive = AsyncMock(return_value=True)
         client.switch_to_account = BrowserClient.switch_to_account.__get__(client, BrowserClient)
         client.inject_cookies_and_reload = AsyncMock()
@@ -553,7 +553,6 @@ def test_switch_clear_exception_marks_browser_not_ready_without_relabeling_accou
         assert manager.active_account_id == accounts[0].id
         assert client.is_ready is False
         client.inject_cookies_and_reload.assert_not_awaited()
-
     asyncio.run(run())
 
 
@@ -561,16 +560,13 @@ def test_switch_clear_exception_marks_browser_not_ready_without_relabeling_accou
 def test_cancelled_switch_leaves_not_ready_and_does_not_spawn_restore(tmp_path, cancel_at):
     async def run():
         client, manager, accounts = _client_with_accounts(tmp_path, strategy="failover", count=2)
-        context = MagicMock()
-        client._context = context
-        client._page = MagicMock()
         client.is_alive = AsyncMock(return_value=True)
         client.switch_to_account = BrowserClient.switch_to_account.__get__(client, BrowserClient)
         if cancel_at == "clear":
-            context.clear_cookies = AsyncMock(side_effect=asyncio.CancelledError())
+            client.clear_cookies = AsyncMock(side_effect=asyncio.CancelledError())
             client.inject_cookies_and_reload = AsyncMock()
         else:
-            context.clear_cookies = AsyncMock(return_value=None)
+            client.clear_cookies = AsyncMock(return_value=None)
             client.inject_cookies_and_reload = AsyncMock(side_effect=asyncio.CancelledError())
 
         with pytest.raises(asyncio.CancelledError):
@@ -579,8 +575,7 @@ def test_cancelled_switch_leaves_not_ready_and_does_not_spawn_restore(tmp_path, 
         assert manager.active_account_id == accounts[0].id
         assert client.is_ready is False
         assert client.inject_cookies_and_reload.await_count == (0 if cancel_at == "clear" else 1)
-        assert context.clear_cookies.await_count == 1
-
+        assert client.clear_cookies.await_count == 1
     asyncio.run(run())
 
 
@@ -690,10 +685,8 @@ def test_background_login_wait_does_not_hold_browser_gate(tmp_path):
     client.wait_for_login = wait_for_login
     client.switch_mode = AsyncMock(return_value=True)
     client.headless = False
-    page = MagicMock()
-    page.is_closed.return_value = False
-    page.bring_to_front = AsyncMock()
-    client._page = page
+    client.is_alive = AsyncMock(return_value=True)
+    client._trigger_login_dialog = AsyncMock()
     app = create_app(browser_client=client)
 
     with TestClient(app) as test_client:

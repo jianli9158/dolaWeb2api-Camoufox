@@ -1,1634 +1,1285 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Doubao 2API 控制台</title>
-<!-- Vue 3 with CDN fallback -->
-<script src="https://cdn.jsdelivr.net/npm/vue@3/dist/vue.global.prod.js"></script>
-<script>if(!window.Vue)document.write('<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"><\/script>')</script>
-<!-- Tailwind CSS with CDN fallback -->
-<script src="https://cdn.tailwindcss.com"></script>
-<script>
-if(window.tailwind){
-  tailwind.config={theme:{extend:{colors:{
-    brand:{50:'#eef2ff',100:'#e0e7ff',500:'#6366f1',600:'#4f46e5',700:'#4338ca',800:'#3730a3',900:'#312e81'},
-    surface:{50:'#f8fafc',100:'#f1f5f9',200:'#e2e8f0',700:'#334155',800:'#1e293b',900:'#0f172a'}
-  }}}}
-}
-</script>
-<style>
-[v-cloak]{display:none}
-*{box-sizing:border-box}
-body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0f172a;color:#e2e8f0;margin:0}
-.sidebar-item{transition:all .15s}
-.sidebar-item:hover{background:rgba(99,102,241,.15)}
-.sidebar-item.active{background:rgba(99,102,241,.2);border-right:3px solid #6366f1;color:#fff}
-.glass{background:rgba(15,23,42,.85);backdrop-filter:blur(12px);border-bottom:1px solid rgba(255,255,255,.06)}
-.card{background:#1e293b;border:1px solid rgba(255,255,255,.06);border-radius:12px;padding:20px}
-.card-glow{box-shadow:0 0 20px rgba(99,102,241,.05)}
-.metric{background:linear-gradient(135deg,#1e293b 0%,#1a2332 100%)}
-pre.out{max-height:420px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;scrollbar-width:thin}
-pre.out::-webkit-scrollbar{width:6px}
-pre.out::-webkit-scrollbar-thumb{background:#475569;border-radius:3px}
-.thinking-box{background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);border-left:3px solid #a78bfa}
-.pulse{animation:pulse 2s infinite}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
-input,select,textarea{background:#1e293b;border:1px solid #334155;color:#e2e8f0;border-radius:8px;padding:10px 14px}
-input:focus,select:focus,textarea:focus{outline:none;border-color:#6366f1;box-shadow:0 0 0 3px rgba(99,102,241,.15)}
-.btn{padding:9px 20px;background:linear-gradient(135deg,#6366f1,#4f46e5);color:#fff;border-radius:8px;font-size:13px;font-weight:600;border:none;cursor:pointer;transition:all .15s;display:inline-flex;align-items:center;justify-content:center;gap:6px}
-.btn:hover{transform:translateY(-1px);box-shadow:0 4px 12px rgba(99,102,241,.3)}
-.btn:disabled{opacity:.5;cursor:not-allowed;transform:none;box-shadow:none}
-.btn-primary{background:linear-gradient(135deg,#3b82f6,#2563eb)}
-.btn-primary:hover{box-shadow:0 4px 12px rgba(59,130,246,.3)}
-.btn-success{background:linear-gradient(135deg,#10b981,#059669)}
-.btn-success:hover{box-shadow:0 4px 12px rgba(16,185,129,.3)}
-.btn-sm{padding:6px 14px;background:#334155;color:#e2e8f0;border-radius:6px;font-size:12px;border:none;cursor:pointer;transition:all .15s}
-.btn-sm:hover{background:#475569}
-.badge{display:inline-flex;align-items:center;padding:2px 8px;border-radius:9999px;font-size:11px;font-weight:500}
-</style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1.0">
+  <title>Dola 2API 控制台 · dolaWeb2api-Camoufox</title>
+  <script src="https://cdn.jsdelivr.net/npm/vue@3/dist/vue.global.prod.js"></script>
+  <script>if(!window.Vue)document.write('<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"><\/script>')</script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            brand: { 400: '#818cf8', 500: '#6366f1', 600: '#4f46e5', 700: '#4338ca' },
+            surface: { 800: '#161b26', 850: '#111621', 900: '#0b0f17', 950: '#070a10' }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    [v-cloak]{display:none}
+    *{box-sizing:border-box}
+    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Inter',system-ui,sans-serif;background:#070a10;color:#e2e8f0;margin:0}
+    .glass{background:rgba(17,22,33,0.82);backdrop-filter:blur(12px);border-bottom:1px solid rgba(148,163,184,0.1)}
+    .card{background:#111621;border:1px solid rgba(148,163,184,0.12);border-radius:14px;padding:18px}
+    .sidebar-item{transition:all .15s;border-left:2px solid transparent}
+    .sidebar-item:hover{background:rgba(99,102,241,0.1);color:#e2e8f0}
+    .sidebar-item.active{background:rgba(99,102,241,0.16);color:#a5b4fc;border-left-color:#6366f1}
+    .btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:8px 14px;border-radius:9px;font-size:13px;font-weight:500;cursor:pointer;transition:all .15s;border:1px solid rgba(148,163,184,0.16);background:#161b26;color:#e2e8f0}
+    .btn:hover:not(:disabled){background:#1f2737;border-color:rgba(148,163,184,0.3)}
+    .btn:disabled{opacity:.45;cursor:not-allowed}
+    .btn-primary{background:#4f46e5;border-color:#6366f1;color:#fff}
+    .btn-primary:hover:not(:disabled){background:#4338ca}
+    .btn-emerald{background:#059669;border-color:#10b981;color:#fff}
+    .btn-emerald:hover:not(:disabled){background:#047857}
+    .btn-danger{background:rgba(225,29,72,0.14);border-color:rgba(225,29,72,0.35);color:#fda4af}
+    .btn-danger:hover:not(:disabled){background:rgba(225,29,72,0.28)}
+    .btn-sm{padding:5px 10px;font-size:12px;border-radius:7px}
+    .input{width:100%;background:#0b0f17;border:1px solid rgba(148,163,184,0.2);border-radius:9px;padding:8px 12px;font-size:13px;color:#e2e8f0;outline:none}
+    .input:focus{border-color:#6366f1;box-shadow:0 0 0 2px rgba(99,102,241,0.2)}
+    .badge{display:inline-flex;align-items:center;gap:5px;padding:2px 9px;border-radius:999px;font-size:11px;font-weight:600}
+    .pulse{animation:pulseDot 2s cubic-bezier(.4,0,.6,1) infinite}
+    @keyframes pulseDot{0%,100%{opacity:1}50%{opacity:.35}}
+    ::-webkit-scrollbar{width:6px;height:6px}
+    ::-webkit-scrollbar-thumb{background:#283347;border-radius:3px}
+  </style>
 </head>
-<body class="min-h-screen text-slate-200">
+<body>
 <div id="app" v-cloak class="flex h-screen overflow-hidden">
 
-<!-- Sidebar -->
-<aside class="w-60 bg-surface-900 border-r border-slate-800 flex flex-col shrink-0">
-  <div class="p-5 border-b border-slate-800">
-    <div class="flex items-center gap-2.5">
-      <div class="w-9 h-9 rounded-xl bg-gradient-to-br from-brand-500 to-purple-600 flex items-center justify-center shadow-lg shadow-indigo-500/20">
-        <svg class="w-5 h-5 text-white" fill="currentColor" viewBox="0 0 20 20"><path d="M10 2L3 7v6l7 5 7-5V7l-7-5z"/></svg>
+  <!-- Left Sidebar -->
+  <aside class="w-56 shrink-0 bg-surface-900 border-r border-slate-800/90 flex flex-col">
+    <div class="p-5 border-b border-slate-800/80 flex items-center gap-3">
+      <div class="w-9 h-9 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center text-white font-bold text-sm shadow-lg shadow-indigo-500/20">
+        D
       </div>
       <div>
-        <div class="font-bold text-white text-sm tracking-wide">Doubao 2API</div>
-        <div class="text-xs text-slate-400">OpenAI 兼容代理服务</div>
+        <div class="font-bold text-white text-sm tracking-wide">dolaWeb2api</div>
+        <div class="text-[11px] text-slate-400">Camoufox BiDi 国际版</div>
       </div>
     </div>
-  </div>
 
-  <nav class="flex-1 py-4 px-2 space-y-1">
-    <button v-for="(tab,i) in tabs" :key="i" @click="activeTab=i"
-      :class="['sidebar-item w-full text-left px-4 py-3 rounded-lg text-sm flex items-center gap-3 font-medium', activeTab===i ? 'active' : 'text-slate-400']">
-      <span v-html="icons[i]"></span>{{tab.name}}
-    </button>
-  </nav>
+    <nav class="flex-1 py-4 px-2.5 space-y-1">
+      <button v-for="(tab,i) in tabs" :key="i" @click="switchTab(i)"
+        :class="['sidebar-item w-full text-left px-3.5 py-2.5 rounded-lg text-sm flex items-center gap-3 font-medium', activeTab===i ? 'active' : 'text-slate-400']">
+        <span v-html="tab.icon"></span>
+        <span>{{tab.name}}</span>
+        <span v-if="i===0" class="ml-auto text-[11px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 font-mono">{{accounts.length}}</span>
+      </button>
+    </nav>
 
-  <div class="p-4 border-t border-slate-800 bg-surface-900/60 space-y-2">
-    <div class="flex items-center justify-between text-xs">
-      <span class="text-slate-400">会话授权状态</span>
-      <div class="flex items-center gap-1.5 font-medium" :class="session&&session.logged_in?'text-emerald-400':'text-rose-400'">
-        <span :class="['w-2 h-2 rounded-full', session&&session.logged_in?'bg-emerald-400 pulse':'bg-rose-400']"></span>
-        {{session&&session.logged_in?'已登录就绪':'未登录'}}
+    <div class="p-4 border-t border-slate-800/80 bg-surface-950/60 space-y-2 text-xs">
+      <div class="flex items-center justify-between">
+        <span class="text-slate-400">运行引擎</span>
+        <span class="text-emerald-400 font-mono">Camoufox BiDi</span>
+      </div>
+      <div class="flex items-center justify-between">
+        <span class="text-slate-400">隔离模式</span>
+        <span class="text-indigo-300">单号独立资料</span>
+      </div>
+      <div class="flex items-center justify-between text-slate-500 pt-1.5 border-t border-slate-800/80 font-mono text-[11px]">
+        <span class="truncate max-w-[120px]">{{serverInfo.platform || 'Local'}}</span>
+        <span>v2.0.0</span>
       </div>
     </div>
-    <div class="flex items-center justify-between text-xs text-slate-500 pt-1 border-t border-slate-800/80 font-mono">
-      <span>{{serverInfo.platform || 'System'}}</span>
-      <span>v0.2.0</span>
-    </div>
-  </div>
-</aside>
+  </aside>
 
-<!-- Main Content -->
-<div class="flex-1 overflow-y-auto">
-  <header class="sticky top-0 z-10 glass px-8 py-3.5 flex items-center justify-between">
-    <div class="flex items-center gap-3">
-      <h1 class="text-base font-bold text-white">{{tabs[activeTab].name}}</h1>
-      <span class="text-xs px-2.5 py-0.5 rounded-full border"
-        :class="session&&session.logged_in?'bg-emerald-950/60 text-emerald-400 border-emerald-800/50':'bg-rose-950/60 text-rose-400 border-rose-800/50'">
-        {{session&&session.logged_in?'API 服务正常':'等待登录'}}
-      </span>
-      <span class="text-xs px-2.5 py-0.5 rounded-full border bg-amber-950/60 text-amber-300 border-amber-800/50 flex items-center gap-1" title="API 请求完成后会自动删除豆包临时对话，保持侧边栏干净整洁">
-        <span>🔥</span> 即用即焚模式
-      </span>
-    </div>
-    <div class="flex items-center gap-2.5">
-      <!-- API Key management button -->
-      <button @click="showKeyModal=true" class="btn-sm flex items-center gap-1.5 font-mono" :class="apiKey?'border border-indigo-500/50 text-indigo-300':'border border-slate-700 text-slate-400'">
-        <span>🔑</span>
-        <span>{{apiKey ? 'Key: 已配置' : '设置 API Key'}}</span>
-      </button>
-      <button @click="resetCaptcha" class="btn btn-sm btn-outline border-slate-700 text-slate-300 hover:text-white" title="重置验证拦截状态，恢复API畅通">
-        🔄 解除拦截
-      </button>
-      <button @click="openDoubaoWeb" class="btn btn-sm btn-primary">
-        🌐 打开豆包
-      </button>
-      <div class="text-xs text-slate-400 font-mono pl-2">{{currentTime}}</div>
-    </div>
-  </header>
-
-  <div class="p-8 max-w-6xl mx-auto space-y-6">
-
-    <!-- TAB 0: 3 步使用向导与状态 -->
-    <section v-show="activeTab===0" class="space-y-6">
-
-      <!-- Captcha Alert Banner if needs_captcha is True -->
-      <div v-if="session && session.needs_captcha" class="card border border-amber-500/40 bg-amber-950/40 flex items-center justify-between p-4 rounded-xl">
-        <div class="flex items-center gap-3">
-          <span class="text-2xl">⚠️</span>
-          <div>
-            <div class="text-sm font-bold text-amber-300">安全风控状态预警 (needs_captcha)</div>
-            <div class="text-xs text-amber-400/80 mt-0.5">检测到验证拦截标志。若打开的浏览器窗口中未见滑块拼图（偶发误判），可直接点击右侧按钮一键解锁自愈。</div>
-          </div>
-        </div>
-        <button @click="resetCaptcha" class="btn btn-sm bg-amber-600 hover:bg-amber-500 text-white font-medium shrink-0 ml-4">
-          🔄 一键解除拦截
+  <!-- Main Content Area -->
+  <div class="flex-1 flex flex-col overflow-hidden">
+    <!-- Top Bar -->
+    <header class="sticky top-0 z-10 glass px-6 py-3 flex items-center justify-between gap-4">
+      <div class="flex items-center gap-3">
+        <h1 class="text-base font-bold text-white">{{tabs[activeTab].name}}</h1>
+        <span class="badge border"
+          :class="session && session.logged_in ? 'bg-emerald-950/70 text-emerald-400 border-emerald-800/60' : 'bg-amber-950/70 text-amber-300 border-amber-800/60'">
+          <span :class="['w-1.5 h-1.5 rounded-full', session && session.logged_in ? 'bg-emerald-400 pulse' : 'bg-amber-400']"></span>
+          {{session && session.logged_in ? '活跃账号已就绪' : (accounts.length ? '待激活/需重登' : '空闲（请添加账号）')}}
+        </span>
+      </div>
+      <div class="flex items-center gap-2">
+        <button @click="toggleAutoDelete" class="btn btn-sm"
+          :class="autoDeleteConv ? 'border-amber-700/60 text-amber-300 bg-amber-950/30' : 'border-slate-700 text-slate-300'"
+          title="切换即用即焚模式：开启后 API 调用自动删除 Dola 临时对话">
+          {{autoDeleteConv ? '🔥 即用即焚' : '💾 保留历史'}}
         </button>
+        <button @click="showKeyModal=true" class="btn btn-sm font-mono"
+          :class="apiKey ? 'border-indigo-500/50 text-indigo-300' : 'text-slate-400'">
+          🔑 {{apiKey ? 'API Key 已配置' : 'API Key'}}
+        </button>
+        <div class="text-xs text-slate-500 font-mono pl-1 hidden sm:block">{{currentTime}}</div>
       </div>
+    </header>
 
-      <!-- Main Status Banner -->
-      <div class="card p-5 border flex flex-col md:flex-row items-start md:items-center justify-between gap-4"
-           :class="session&&session.logged_in ? 'border-emerald-500/40 bg-emerald-950/20' : 'border-amber-500/40 bg-amber-950/20'">
-        <div class="flex items-center gap-3.5">
-          <div class="w-10 h-10 rounded-xl flex items-center justify-center text-xl shrink-0"
-               :class="session&&session.logged_in ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-amber-500/20 text-amber-400 border border-amber-500/30'">
-            {{session&&session.logged_in ? '✓' : '!'}}
-          </div>
-          <div>
-            <div class="text-base font-bold flex items-center gap-2"
-                 :class="session&&session.logged_in ? 'text-emerald-300' : 'text-amber-300'">
-              <span>{{session&&session.logged_in ? '服务状态：已授权就绪' : '服务状态：等待登录授权'}}</span>
-              <span class="text-xs px-2.5 py-0.5 rounded-full font-mono font-normal"
-                    :class="session&&session.logged_in ? 'bg-emerald-900/60 text-emerald-300 border border-emerald-700/50' : 'bg-amber-900/60 text-amber-300 border border-amber-700/50'">
-                {{session&&session.logged_in ? '就绪可请求' : '未登录'}}
-              </span>
+    <main class="flex-1 overflow-y-auto p-6 space-y-5">
+
+      <!-- =============================================================== -->
+      <!-- TAB 0: 账号管理（合并状态概览 + 隔离多账号池 + 浏览器新增/管理）  -->
+      <!-- =============================================================== -->
+      <section v-show="activeTab===0" class="space-y-5 max-w-7xl mx-auto">
+
+        <!-- Overview Stats Row -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <div class="card flex flex-col justify-between">
+            <div class="text-xs text-slate-400">账号池统计</div>
+            <div class="mt-2 flex items-baseline gap-2">
+              <span class="text-2xl font-bold text-white font-mono">{{activeAvailableCount}}</span>
+              <span class="text-xs text-slate-400">/ {{accounts.length}} 个可用</span>
             </div>
-            <p class="text-xs text-slate-400 mt-1">
-              {{session&&session.logged_in ? '当前会话凭证正常，OpenAI 兼容接口及各第三方客户端均可畅通调用。' : '请根据下方【步骤 1】在您当前使用的浏览器中登录并导入 Cookie，即可秒速激活。'}}
-            </p>
+            <div class="mt-2 text-[11px] text-slate-500">每个账号使用独立隔离 Profile 与指纹</div>
+          </div>
+
+          <div class="card flex flex-col justify-between">
+            <div class="text-xs text-slate-400">当前活跃账号</div>
+            <div class="mt-2 text-base font-bold text-white truncate">
+              {{activeAccountObj ? activeAccountObj.name : '未选择'}}
+            </div>
+            <div class="mt-2 flex items-center gap-2 text-[11px] text-slate-400 font-mono">
+              <span v-if="session && session.region">地区 {{session.region}}</span>
+              <span v-if="session && session.headless !== undefined">{{session.headless ? '后台无头' : '有头窗口'}}</span>
+              <span v-if="!activeAccountObj" class="text-slate-500">无自动弹出浏览器</span>
+            </div>
+          </div>
+
+          <div class="card flex flex-col justify-between">
+            <div class="text-xs text-slate-400">账号轮换策略</div>
+            <div class="mt-2 flex items-center gap-1.5">
+              <button @click="setStrategy('failover')" class="btn btn-sm flex-1"
+                :class="accountStrategy==='failover' ? 'btn-primary' : ''">故障切换</button>
+              <button @click="setStrategy('round_robin')" class="btn btn-sm flex-1"
+                :class="accountStrategy==='round_robin' ? 'btn-primary' : ''">轮询调度</button>
+            </div>
+            <div class="mt-2 text-[11px] text-slate-500">
+              {{accountStrategy==='failover' ? '优先活跃号，冷却/额度耗尽自动切换' : '请求均匀轮询所有可用账号'}}
+            </div>
+          </div>
+
+          <div class="card flex flex-col justify-between">
+            <div class="text-xs text-slate-400">全局默认代理</div>
+            <div class="mt-2 text-xs font-mono text-indigo-300 truncate">
+              {{proxyState.proxy_masked || '直连（未配置全局代理）'}}
+            </div>
+            <div class="mt-2 flex items-center justify-between">
+              <span class="text-[11px] text-slate-500">单号可覆盖独立代理</span>
+              <button @click="activeTab=2" class="text-[11px] text-indigo-400 hover:underline">配置 →</button>
+            </div>
           </div>
         </div>
-        <div class="flex items-center gap-2 shrink-0">
-          <button @click="fetchOverview" class="btn btn-sm btn-outline border-slate-700 text-slate-300 hover:text-white">
-            🔄 刷新状态
+
+        <!-- Toolbar + Accounts Table -->
+        <div class="card space-y-4">
+          <div class="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-3.5">
+            <div>
+              <h2 class="text-sm font-bold text-white flex items-center gap-2">
+                <span>👥 Dola 多账号一览</span>
+                <span class="text-[11px] font-normal px-2 py-0.5 rounded-full bg-indigo-950/60 border border-indigo-500/30 text-indigo-300">
+                  资料完全隔离 · 支持 Web LiveView 远程交互
+                </span>
+              </h2>
+              <p class="text-xs text-slate-400 mt-1">
+                新增账号时使用全新纯净隔离资料与指定代理；点击任意账号后的「管理资料」可单独打开该账号的专属浏览器。
+              </p>
+            </div>
+
+            <div class="flex flex-wrap items-center gap-2">
+              <button @click="openBrowserAddModal" class="btn btn-primary">
+                🌐 浏览器登录新增账号
+              </button>
+              <button @click="showImportModal=true" class="btn">
+                ➕ 导入 Cookie
+              </button>
+              <button @click="probeAllAccounts" :disabled="probingAccounts || !accounts.length" class="btn">
+                {{probingAccounts ? '⏳ 巡检中...' : '🔍 一键巡检'}}
+              </button>
+              <button @click="refreshAll" class="btn" title="刷新账号与状态">
+                🔄 刷新
+              </button>
+            </div>
+          </div>
+
+          <!-- Accounts Table -->
+          <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+              <thead>
+                <tr class="text-left text-xs text-slate-500 border-b border-slate-800">
+                  <th class="py-2.5 pr-3">账号</th>
+                  <th class="py-2.5 px-3">状态 / 冷却</th>
+                  <th class="py-2.5 px-3">隔离资料目录</th>
+                  <th class="py-2.5 px-3">专属代理</th>
+                  <th class="py-2.5 pl-3 text-right">操作</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-slate-800/70">
+                <tr v-for="acc in accounts" :key="acc.id" class="hover:bg-slate-800/30 transition">
+                  <td class="py-3 pr-3">
+                    <div class="flex items-center gap-2">
+                      <span class="font-semibold text-white">{{acc.name}}</span>
+                      <span v-if="acc.id===activeAccountId"
+                        class="badge bg-indigo-500/20 text-indigo-300 border border-indigo-500/40">当前活跃</span>
+                    </div>
+                    <div class="text-[11px] text-slate-500 font-mono mt-0.5">
+                      ID: {{acc.id}} <span v-if="acc.region">· 地区: {{acc.region}}</span>
+                    </div>
+                  </td>
+
+                  <td class="py-3 px-3">
+                    <div class="flex flex-wrap items-center gap-1.5">
+                      <span v-if="acc.status==='active'" class="badge bg-emerald-950/70 text-emerald-400 border border-emerald-800/60">● 正常</span>
+                      <span v-else-if="acc.status==='captcha'" class="badge bg-amber-950/70 text-amber-300 border border-amber-800/60">⚠ 需人机验证</span>
+                      <span v-else-if="acc.status==='quota_exceeded'" class="badge bg-orange-950/70 text-orange-300 border border-orange-800/60">⚡ 视频额度满</span>
+                      <span v-else-if="acc.status==='invalid'" class="badge bg-rose-950/70 text-rose-400 border border-rose-800/60">✕ 凭证失效</span>
+                      <span v-else class="badge bg-slate-800 text-slate-400">{{acc.status}}</span>
+
+                      <span v-for="(secs, feat) in (acc.cooldown_remaining || {})" :key="feat"
+                        class="badge bg-sky-950/70 text-sky-300 border border-sky-800/60 font-mono">
+                        ⏳ {{feat}} {{secs}}s
+                      </span>
+                    </div>
+                  </td>
+
+                  <td class="py-3 px-3">
+                    <span class="text-xs font-mono text-slate-300 bg-surface-900 px-2 py-1 rounded border border-slate-800">
+                      {{acc.profile_dir || ('accounts/' + acc.id)}}
+                    </span>
+                  </td>
+
+                  <td class="py-3 px-3">
+                    <span v-if="acc.proxy_masked" class="text-xs font-mono text-indigo-300">{{acc.proxy_masked}}</span>
+                    <span v-else class="text-xs text-slate-500">继承全局 / 直连</span>
+                  </td>
+
+                  <td class="py-3 pl-3">
+                    <div class="flex items-center justify-end gap-1.5 flex-wrap">
+                      <button @click="openManageAccountBrowser(acc)" class="btn btn-sm border-indigo-500/40 text-indigo-300 hover:bg-indigo-950/50"
+                        title="用该账号独立隔离 Profile 与代理打开远程浏览器（管理资料/重登/过验证）">
+                        🖥️ 管理资料
+                      </button>
+                      <button @click="openEditAccountModal(acc)" class="btn btn-sm" title="修改名称与专属代理">
+                        ✏️ 编辑
+                      </button>
+                      <button v-if="acc.id!==activeAccountId" @click="switchAccount(acc.id)" :disabled="accountActionLoading" class="btn btn-sm">
+                        🎯 切换
+                      </button>
+                      <button v-if="acc.status==='captcha'" @click="clearAccountCaptcha(acc.id)" class="btn btn-sm border-amber-600/50 text-amber-300">
+                        🔓 解除验证
+                      </button>
+                      <button v-if="acc.cooldown_remaining && Object.keys(acc.cooldown_remaining).length" @click="clearAccountCooldown(acc.id)" class="btn btn-sm border-sky-600/50 text-sky-300">
+                        ⏱ 清冷却
+                      </button>
+                      <button @click="deleteAccount(acc)" :disabled="accountActionLoading" class="btn btn-sm btn-danger">
+                        🗑️ 删除
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+
+                <tr v-if="!accounts.length">
+                  <td colspan="5" class="py-12 text-center">
+                    <div class="text-slate-400 text-sm">暂无 Dola 账号</div>
+                    <div class="text-xs text-slate-500 mt-1 mb-4">服务默认不会自动弹出浏览器，点击下方按钮创建第一个独立隔离账号。</div>
+                    <button @click="openBrowserAddModal" class="btn btn-primary">🌐 浏览器登录新增账号</button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- =============================================================== -->
+      <!-- TAB 1: API 调试与创作（对话 / Seedream 图像 / Seedance 视频）     -->
+      <!-- =============================================================== -->
+      <section v-show="activeTab===1" class="space-y-5 max-w-6xl mx-auto">
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-5">
+          <!-- Chat Playground -->
+          <div class="card lg:col-span-2 space-y-3">
+            <div class="flex items-center justify-between">
+              <h3 class="text-sm font-bold text-white">💬 对话与深度思考调试</h3>
+              <label class="flex items-center gap-1.5 text-xs text-slate-400 cursor-pointer">
+                <input type="checkbox" v-model="testChat.stream" class="rounded"> 流式 SSE
+              </label>
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+              <select v-model="testChat.model" class="input">
+                <option value="dola">dola (标准对话)</option>
+                <option value="dola-think">dola-think (深度思考)</option>
+                <option value="dola-pro">dola-pro</option>
+                <option value="dola-expert">dola-expert</option>
+              </select>
+              <input v-model="testChat.prompt" @keyup.enter="runChatTest" class="input sm:col-span-2" placeholder="输入测试问题，例如：What is 17 * 23?">
+            </div>
+            <div class="flex items-center gap-2">
+              <button @click="runChatTest" :disabled="testChat.loading" class="btn btn-primary">
+                {{testChat.loading ? '⏳ 生成中...' : '▶ 发送对话请求'}}
+              </button>
+              <span v-if="testChat.ms" class="text-xs text-slate-400 font-mono">{{testChat.ms}} ms</span>
+            </div>
+            <div v-if="testChat.thinking" class="p-3 rounded-lg bg-violet-950/30 border border-violet-800/40 text-xs text-violet-200 whitespace-pre-wrap">
+              <div class="font-bold text-violet-300 mb-1">🧠 思维链 (reasoning_content)</div>
+              {{testChat.thinking}}
+            </div>
+            <div v-if="testChat.output" class="p-3 rounded-lg bg-surface-900 border border-slate-800 text-sm text-slate-200 whitespace-pre-wrap">{{testChat.output}}</div>
+            <div v-if="testChat.error" class="p-3 rounded-lg bg-rose-950/40 border border-rose-800/50 text-xs text-rose-300">{{testChat.error}}</div>
+          </div>
+
+          <!-- Seedream Image & Seedance Video Test -->
+          <div class="card space-y-4">
+            <h3 class="text-sm font-bold text-white">🎨 Seedream 图像 & 🎬 Seedance 视频</h3>
+
+            <div class="space-y-2 pb-3 border-b border-slate-800">
+              <div class="text-xs text-slate-400 font-medium">图像生成 (`/v1/images/generations`)</div>
+              <div class="grid grid-cols-2 gap-2">
+                <select v-model="testMedia.imgModel" class="input text-xs">
+                  <option value="seedream-4.5">Seedream 4.5</option>
+                  <option value="seedream-5.0-pro">Seedream 5.0 Pro</option>
+                </select>
+                <select v-model="testMedia.imgRatio" class="input text-xs">
+                  <option value="auto">比例: 自动</option>
+                  <option value="1:1">1:1</option>
+                  <option value="16:9">16:9</option>
+                  <option value="9:16">9:16</option>
+                </select>
+              </div>
+              <input v-model="testMedia.imgPrompt" class="input text-xs" placeholder="描述你想生成的图片...">
+              <button @click="runImageTest" :disabled="testMedia.imgLoading" class="btn btn-primary btn-sm w-full">
+                {{testMedia.imgLoading ? '⏳ Seedream 生图中...' : '🎨 生成图片'}}
+              </button>
+              <div v-if="testMedia.imgError" class="text-xs text-rose-400">{{testMedia.imgError}}</div>
+            </div>
+
+            <div class="space-y-2">
+              <div class="text-xs text-slate-400 font-medium">视频生成 (`/v1/video/generations`)</div>
+              <div class="grid grid-cols-3 gap-1.5">
+                <select v-model="testMedia.vidModel" class="input text-xs col-span-2">
+                  <option value="seedance-2.0-fast">Seedance 2.0 Fast</option>
+                  <option value="seedance-1.0">Seedance 1.0</option>
+                </select>
+                <select v-model.number="testMedia.vidDuration" class="input text-xs">
+                  <option :value="5">5s</option>
+                  <option :value="10">10s</option>
+                </select>
+              </div>
+              <input v-model="testMedia.vidPrompt" class="input text-xs" placeholder="描述你想生成的视频画面...">
+              <button @click="runVideoTest" :disabled="testMedia.vidLoading" class="btn btn-emerald btn-sm w-full">
+                {{testMedia.vidLoading ? '⏳ Seedance 生成视频中...' : '🎬 生成视频'}}
+              </button>
+              <div v-if="testMedia.vidError" class="text-xs text-rose-400">{{testMedia.vidError}}</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Recent Media Gallery -->
+        <div class="card space-y-3">
+          <div class="flex items-center justify-between">
+            <h3 class="text-sm font-bold text-white">🖼️ 最近生成媒体 ({{recentMedia.length}})</h3>
+            <button @click="fetchRecentMedia" class="btn btn-sm">🔄 刷新</button>
+          </div>
+          <div v-if="recentMedia.length" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            <div v-for="(item, idx) in recentMedia" :key="idx" class="rounded-xl overflow-hidden bg-surface-900 border border-slate-800 p-2 space-y-1.5">
+              <div class="flex items-center justify-between text-[11px] text-slate-400">
+                <span class="font-mono text-indigo-300">{{item.model || item.type}}</span>
+                <span>{{item.type==='video' ? '🎬 视频' : '🖼️ 图像'}}</span>
+              </div>
+              <video v-if="item.type==='video'" :src="item.url" :poster="item.cover_url" controls class="w-full h-40 object-cover rounded-lg bg-black"></video>
+              <a v-else :href="item.url" target="_blank">
+                <img :src="item.url" class="w-full h-40 object-cover rounded-lg hover:opacity-90 transition">
+              </a>
+              <div class="text-[11px] text-slate-400 truncate" :title="item.prompt">{{item.prompt}}</div>
+            </div>
+          </div>
+          <div v-else class="text-xs text-slate-500 text-center py-8">暂无生成记录</div>
+        </div>
+      </section>
+
+      <!-- =============================================================== -->
+      <!-- TAB 2: 系统配置与模型                                           -->
+      <!-- =============================================================== -->
+      <section v-show="activeTab===2" class="space-y-5 max-w-5xl mx-auto">
+        <div class="card space-y-3">
+          <h3 class="text-sm font-bold text-white">🌐 全局默认代理配置</h3>
+          <p class="text-xs text-slate-400">
+            当单个账号未设置专属代理时使用此全局代理；支持 <code>http://</code>、<code>https://</code>、<code>socks5://</code>、<code>host:port:user:pass</code>、<code>st5 host:port:user:pass</code>。带账号密码的代理自动经本地 <code>LocalSocks5Relay</code> 透明中继至 Camoufox。
+          </p>
+          <div class="flex gap-2">
+            <input v-model="proxyState.input" class="input font-mono text-xs" placeholder="例如 socks5://user:pass@1.2.3.4:1080 或留空表示直连">
+            <button @click="saveGlobalProxy" :disabled="proxyState.loading" class="btn btn-primary shrink-0">
+              {{proxyState.loading ? '保存中...' : '保存全局代理'}}
+            </button>
+          </div>
+          <div v-if="proxyState.message" class="text-xs" :class="proxyState.ok ? 'text-emerald-400' : 'text-rose-400'">{{proxyState.message}}</div>
+        </div>
+
+        <div class="card space-y-3">
+          <h3 class="text-sm font-bold text-white">🔌 OpenAI 兼容 API 接入与模型目录</h3>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+            <div class="p-3 rounded-lg bg-surface-900 border border-slate-800 space-y-1">
+              <div class="text-slate-400">Base URL</div>
+              <div class="font-mono text-indigo-300 select-all">{{apiBaseUrl}}</div>
+            </div>
+            <div class="p-3 rounded-lg bg-surface-900 border border-slate-800 space-y-1">
+              <div class="text-slate-400">上游目标 / 引擎</div>
+              <div class="font-mono text-emerald-300">{{serverInfo.site_url || 'https://www.dola.com'}} · Camoufox WebDriver BiDi</div>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs pt-2">
+            <div class="p-3 rounded-lg bg-surface-900 border border-slate-800 space-y-1.5">
+              <div class="font-bold text-white">💬 对话模型</div>
+              <div class="flex flex-wrap gap-1">
+                <span v-for="m in (serverInfo.models?.chat || []).slice(0,8)" :key="m" class="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 font-mono text-[11px]">{{m}}</span>
+              </div>
+            </div>
+            <div class="p-3 rounded-lg bg-surface-900 border border-slate-800 space-y-1.5">
+              <div class="font-bold text-white">🎨 图像模型 (Seedream)</div>
+              <div class="flex flex-wrap gap-1">
+                <span v-for="m in (serverInfo.models?.image || ['seedream-4.5','seedream-5.0-pro'])" :key="m" class="px-1.5 py-0.5 rounded bg-indigo-950/60 text-indigo-300 border border-indigo-800/40 font-mono text-[11px]">{{m}}</span>
+              </div>
+            </div>
+            <div class="p-3 rounded-lg bg-surface-900 border border-slate-800 space-y-1.5">
+              <div class="font-bold text-white">🎬 视频模型 (Seedance)</div>
+              <div class="flex flex-wrap gap-1">
+                <span v-for="m in (serverInfo.models?.video || ['seedance-2.0-fast','seedance-1.0'])" :key="m" class="px-1.5 py-0.5 rounded bg-emerald-950/60 text-emerald-300 border border-emerald-800/40 font-mono text-[11px]">{{m}}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- =============================================================== -->
+      <!-- TAB 3: 请求日志                                                 -->
+      <!-- =============================================================== -->
+      <section v-show="activeTab===3" class="space-y-4 max-w-6xl mx-auto">
+        <div class="card space-y-3">
+          <div class="flex items-center justify-between">
+            <h3 class="text-sm font-bold text-white">📋 最近 API 请求日志</h3>
+            <button @click="fetchLogs" class="btn btn-sm">🔄 刷新</button>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-xs font-mono">
+              <thead>
+                <tr class="text-left text-slate-500 border-b border-slate-800">
+                  <th class="py-2">时间</th>
+                  <th class="py-2">方法</th>
+                  <th class="py-2">路径</th>
+                  <th class="py-2">状态</th>
+                  <th class="py-2 text-right">耗时</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-slate-800/60">
+                <tr v-for="(l, idx) in logs" :key="idx">
+                  <td class="py-2 text-slate-400">{{formatTs(l.ts)}}</td>
+                  <td class="py-2 text-indigo-300">{{l.method}}</td>
+                  <td class="py-2 text-slate-200">{{l.path}}</td>
+                  <td class="py-2">
+                    <span :class="l.status < 400 ? 'text-emerald-400' : 'text-rose-400'">{{l.status}}</span>
+                  </td>
+                  <td class="py-2 text-right text-slate-400">{{l.ms}} ms</td>
+                </tr>
+                <tr v-if="!logs.length">
+                  <td colspan="5" class="py-8 text-center text-slate-500">暂无请求记录</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <!-- =================================================================== -->
+  <!-- MODAL 1: 隔离浏览器登录（新增账号 / 管理已有账号资料 + Web LiveView） -->
+  <!-- =================================================================== -->
+  <div v-if="browserModal.open" class="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+    <div class="bg-surface-850 border border-slate-700/80 rounded-2xl w-full max-w-5xl max-h-[92vh] flex flex-col overflow-hidden shadow-2xl">
+      <!-- Modal Header -->
+      <div class="px-5 py-3.5 border-b border-slate-800 flex items-center justify-between gap-3">
+        <div>
+          <h3 class="text-sm font-bold text-white flex items-center gap-2">
+            <span>{{browserModal.mode==='add' ? '🌐 浏览器登录新增 Dola 账号（全新纯净隔离资料）' : '🖥️ 管理账号独立资料：' + browserModal.name}}</span>
+            <span v-if="browserModal.sessionId" class="badge bg-indigo-950 text-indigo-300 border border-indigo-700/50 font-mono">
+              {{browserModal.status}}
+            </span>
+          </h3>
+          <p class="text-xs text-slate-400 mt-0.5">{{browserModal.message || '每个会话拥有独立 Camoufox Profile、指纹与代理，绝不串号'}}</p>
+        </div>
+        <button @click="closeBrowserModal" class="btn btn-sm">✕ 关闭</button>
+      </div>
+
+      <!-- Step A: Pre-launch Setup (Mode = Add, before session started) -->
+      <div v-if="!browserModal.sessionId" class="p-6 space-y-4">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div class="space-y-1.5">
+            <label class="text-xs text-slate-300 font-medium">账号名称（可选，留空自动识别）</label>
+            <input v-model="browserModal.name" class="input" placeholder="例如：Dola-日区主号 / Google号2">
+          </div>
+          <div class="space-y-1.5">
+            <label class="text-xs text-slate-300 font-medium">登录及绑定代理（可选，留空走全局代理/直连）</label>
+            <input v-model="browserModal.proxyUrl" class="input font-mono text-xs"
+              placeholder="http://user:pass@ip:port 或 socks5://... 或 st5 ip:port:user:pass">
+          </div>
+        </div>
+
+        <div class="flex items-center justify-between p-3 rounded-xl bg-surface-900 border border-slate-800 text-xs">
+          <label class="flex items-center gap-2 text-slate-300 cursor-pointer">
+            <input type="checkbox" v-model="browserModal.headless" class="rounded">
+            <span>使用无头模式 + 网页内嵌 <b>Web LiveView</b> 登录（取消勾选则同时弹出本机 Camoufox 窗口，适合本机 Google OAuth）</span>
+          </label>
+        </div>
+
+        <div v-if="browserModal.error" class="p-3 rounded-lg bg-rose-950/40 border border-rose-800/60 text-xs text-rose-300">
+          {{browserModal.error}}
+        </div>
+
+        <div class="flex justify-end gap-2 pt-2">
+          <button @click="closeBrowserModal" class="btn">取消</button>
+          <button @click="startBrowserLoginSession" :disabled="browserModal.starting" class="btn btn-primary">
+            {{browserModal.starting ? '⏳ 正在启动隔离 Camoufox...' : '🚀 启动全新隔离浏览器'}}
           </button>
         </div>
       </div>
 
-      <!-- STEP 1: 账号登录与凭证授权 (路径 B 主推) -->
-      <div class="card card-glow border border-indigo-500/30 space-y-4">
-        <div class="flex items-center justify-between border-b border-slate-800 pb-3">
-          <div class="flex items-center gap-2.5">
-            <span class="w-6 h-6 rounded-full bg-indigo-600 text-white text-xs font-bold flex items-center justify-center">1</span>
-            <h2 class="text-sm font-bold text-white">账号登录与凭证授权（主推路径 B：在当前浏览器中登录）</h2>
-          </div>
-          <span class="text-xs text-slate-400">最稳妥、免风控干扰、持久有效</span>
-        </div>
-
-        <!-- 路径 B 核心流程：打开登录 + Cookie 激活 -->
-        <div class="grid grid-cols-1 lg:grid-cols-12 gap-4">
-          <!-- 左侧：一键在日常浏览器打开 -->
-          <div class="lg:col-span-5 p-4 rounded-xl bg-surface-800/80 border border-slate-700/80 space-y-3 flex flex-col justify-between">
-            <div class="space-y-2">
-              <div class="text-xs font-bold text-slate-200 flex items-center gap-1.5">
-                <span>🌐</span> 第一小步：在当前浏览器中登录
-              </div>
-              <p class="text-xs text-slate-400 leading-relaxed">
-                点击下方按钮，直接在您当前正在使用的浏览器（Edge/Chrome）新标签页中打开豆包官网并登录：
-              </p>
-            </div>
-            <button @click="openDoubaoWeb" class="btn btn-primary w-full py-2.5 text-xs font-semibold flex items-center justify-center gap-2 shadow-lg">
-              <span>🚀</span>
-              <span>在当前浏览器打开豆包官网</span>
-            </button>
-            <div class="text-[11px] text-slate-500 pt-1 border-t border-slate-700/50">
-              💡 网页端支持手机验证码、微信或抖音扫码登录，几秒即可完成。
-            </div>
-          </div>
-
-          <!-- 右侧：Cookie 复制与粘贴激活 -->
-          <div class="lg:col-span-7 p-4 rounded-xl bg-surface-800/80 border border-slate-700/80 space-y-3">
-            <div class="text-xs font-bold text-slate-200 flex items-center justify-between">
-              <span class="flex items-center gap-1.5"><span>📥</span> 第二小步：复制 Cookie 粘贴激活</span>
-              <span class="text-indigo-400 text-xs font-normal">极速 5 秒搞定</span>
-            </div>
-            <div class="text-xs text-slate-300 space-y-1 bg-surface-900/80 p-2.5 rounded-lg border border-slate-700/50 font-mono">
-              <div>1. 在刚登录的豆包网页按 <kbd class="px-1.5 py-0.5 rounded bg-slate-700 font-mono text-slate-200">F12</kbd> 打开控制台；</div>
-              <div>2. 切换到 <span class="text-indigo-300 font-semibold">Console (控制台)</span>，输入 <code class="text-emerald-400 font-bold select-all">copy(document.cookie)</code> 回车；</div>
-              <div>3. 粘贴到下方文本框，点击【确认导入并激活】（亦可直接粘贴 sessionid）。</div>
-            </div>
-            <div class="flex gap-2">
-              <input v-model="cookieInput" type="text" class="flex-1 text-xs font-mono" placeholder="粘贴 Cookie 字符串（或直接粘贴 sessionid 的值）..." />
-              <button @click="submitCookie" :disabled="cookieLoading||!cookieInput.trim()" class="btn btn-success text-xs font-semibold px-4 shrink-0">
-                {{cookieLoading?'正在激活...':'确认导入并激活'}}
-              </button>
-            </div>
-            <div v-if="cookieMessage" class="text-xs font-semibold" :class="cookieMessage.includes('成功')?'text-emerald-400':'text-rose-400'">
-              {{cookieMessage}}
-            </div>
-          </div>
-        </div>
-
-        <!-- 备用登录选项 -->
-        <div class="pt-2 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400">
-          <span>其他登录途径（备选）：</span>
-          <div class="flex items-center gap-2">
-            <button @click="forceWindow" :disabled="windowActionLoading" class="btn-sm text-xs border border-slate-700 text-slate-300 hover:text-white">
-              🖥️ {{windowActionLoading?'正在打开...':'打开独立桌面浏览器窗口'}}
-            </button>
-            <button @click="toggleQrModal" class="btn-sm text-xs border border-indigo-700 text-indigo-300 hover:text-white">
-              📱 {{showQrModal?'收起扫码框':'手机 App 纯净扫码登录'}}
-            </button>
-          </div>
-        </div>
-
-        <!-- Inline QR Login Viewer (Pure HTTP QR) -->
-        <div v-if="showQrModal" class="p-5 rounded-xl bg-slate-900/90 border border-indigo-500/40 space-y-4">
-          <div class="flex items-center justify-between">
-            <span class="text-sm text-white font-bold flex items-center gap-2">
-              <span>📱 纯净免窗口扫码登录</span>
-              <span class="badge bg-indigo-900/60 text-indigo-300 border border-indigo-700/50">无需图形界面</span>
-            </span>
-            <div class="flex items-center gap-2">
-              <button @click="startQrLogin" :disabled="qrState.loading" class="btn-sm text-xs">🔄 重新获取二维码</button>
-              <button @click="showQrModal=false" class="text-slate-400 hover:text-white text-sm px-2">✕</button>
-            </div>
-          </div>
-
-          <div class="flex flex-col sm:flex-row items-center gap-6 py-2">
-            <div class="relative w-48 h-48 bg-white p-2 rounded-xl flex items-center justify-center shadow-lg border border-slate-300">
-              <img v-if="qrState.img" :src="'data:image/png;base64,'+qrState.img" class="w-full h-full object-contain" alt="QR Code" />
-              <div v-else-if="qrState.loading" class="text-slate-500 text-xs text-center">
-                <div class="w-6 h-6 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin mx-auto mb-2"></div>
-                正在生成二维码...
-              </div>
-              <div v-else class="text-rose-500 text-xs text-center p-2">{{qrState.error || '获取失败'}}</div>
-            </div>
-
-            <div class="flex-1 space-y-2 text-xs">
-              <div class="font-bold text-sm" :class="qrStatusColor">{{qrState.statusText}}</div>
-              <p class="text-slate-400">1. 打开手机端【豆包 App】或微信/抖音扫一扫；</p>
-              <p class="text-slate-400">2. 扫描左侧二维码并在手机上点击确认授权；</p>
-              <p class="text-slate-400">3. 确认后系统将自动提取会话并同步，无需任何手动配置！</p>
-              <div v-if="qrState.status==='success'" class="p-2.5 rounded-lg bg-emerald-950/60 border border-emerald-800 text-emerald-300 font-semibold">
-                🎉 登录成功！会话已自动就绪，您现在可以随时调用 API 了！
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- STEP 2: 获取服务地址与客户端配置 -->
-      <div class="card border border-slate-700 space-y-4">
-        <div class="flex items-center justify-between border-b border-slate-800 pb-3">
-          <div class="flex items-center gap-2.5">
-            <span class="w-6 h-6 rounded-full bg-emerald-600 text-white text-xs font-bold flex items-center justify-center">2</span>
-            <h2 class="text-sm font-bold text-white">获取 API 服务地址并配置到客户端</h2>
-          </div>
-          <span class="text-xs text-slate-400">OpenAI 格式标准兼容</span>
-        </div>
-
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-          <div class="p-3.5 bg-surface-800 rounded-xl border border-slate-700 flex items-center justify-between">
-            <div>
-              <span class="text-slate-400 text-xs block mb-1 font-medium">接口地址 (Base URL):</span>
-              <code class="font-mono text-indigo-300 font-bold select-all text-sm">{{apiBaseUrl}}</code>
-            </div>
-            <button @click="copyText(apiBaseUrl, '已复制 Base URL!')" class="btn-sm text-xs">复制</button>
-          </div>
-          <div class="p-3.5 bg-surface-800 rounded-xl border border-slate-700 flex items-center justify-between">
-            <div>
-              <span class="text-slate-400 text-xs block mb-1 font-medium">API Key (密钥):</span>
-              <code class="font-mono text-emerald-400 font-bold select-all text-sm">{{apiKey || 'sk-doubao (无需密钥或任意字符)'}}</code>
-            </div>
-            <div class="flex items-center gap-1.5">
-              <button @click="copyText(apiKey || 'sk-doubao', '已复制 API Key!')" class="btn-sm text-xs">复制</button>
-              <button @click="showKeyModal=true" class="btn-sm text-xs text-slate-400 hover:text-white">修改</button>
-            </div>
-          </div>
-        </div>
-
-        <!-- 常用模型速查与客户端提示 -->
-        <div class="p-3 rounded-lg bg-surface-900/60 border border-slate-800 text-xs space-y-2">
-          <div class="text-slate-300 font-semibold flex items-center gap-1.5">
-            <span>💡</span> 常用模型推荐填入：
-          </div>
-          <div class="grid grid-cols-2 md:grid-cols-4 gap-2 text-slate-400 font-mono">
-            <div class="p-2.5 rounded bg-surface-800 border border-slate-700/60">
-              <div class="text-white font-bold">doubao-2.1-turbo</div>
-              <div class="text-[11px] text-slate-400 font-sans mt-0.5">极速推荐，日常对话</div>
-            </div>
-            <div class="p-2.5 rounded bg-surface-800 border border-slate-700/60">
-              <div class="text-indigo-300 font-bold">doubao-think</div>
-              <div class="text-[11px] text-slate-400 font-sans mt-0.5">深度思考，强逻辑推理</div>
-            </div>
-            <div class="p-2.5 rounded bg-surface-800 border border-slate-700/60">
-              <div class="text-emerald-300 font-bold">doubao-2.1-pro</div>
-              <div class="text-[11px] text-slate-400 font-sans mt-0.5">专业版，代码创作</div>
-            </div>
-            <div class="p-2.5 rounded bg-surface-800 border border-slate-700/60">
-              <div class="text-amber-300 font-bold">doubao-expert</div>
-              <div class="text-[11px] text-slate-400 font-sans mt-0.5">专家模式，高阶问答</div>
-            </div>
-          </div>
-          <p class="text-slate-500 text-[11px] pt-1">
-            * 完美支持 Cherry Studio、Chatbox、NextChat、Cursor、沉浸式翻译、LobeChat 等所有支持 OpenAI 接口的工具。
-        </div>
-
-        <!-- 常见客户端一键配置卡片 (P1) -->
-        <div class="border border-slate-800 rounded-xl overflow-hidden bg-surface-900/50 p-4 space-y-3">
-          <div class="flex items-center justify-between">
-            <span class="text-xs font-bold text-white flex items-center gap-1.5">
-              <span>🔌</span> 常见第三方客户端一键接入参数（已内置 OpenAI 兼容协议与模型别名）
-            </span>
-            <span class="text-[11px] text-slate-400">点击即可复制对应格式</span>
-          </div>
-          <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
-            <!-- Cherry Studio -->
-            <div class="p-3 bg-surface-800/80 rounded-lg border border-slate-700/70 space-y-2">
-              <div class="flex items-center justify-between">
-                <span class="font-bold text-xs text-white">🍒 Cherry Studio</span>
-                <button @click="copyText(apiBaseUrl, '已复制 Cherry Studio 接口地址!')" class="btn-sm text-[10px] py-0.5 px-2">复制地址</button>
-              </div>
-              <div class="text-[11px] text-slate-400 space-y-0.5 font-mono">
-                <div>API 地址: <span class="text-indigo-300">{{apiBaseUrl}}</span></div>
-                <div>默认模型: <span class="text-emerald-300">doubao-2.1-turbo</span></div>
-              </div>
-            </div>
-            <!-- NextChat / Chatbox -->
-            <div class="p-3 bg-surface-800/80 rounded-lg border border-slate-700/70 space-y-2">
-              <div class="flex items-center justify-between">
-                <span class="font-bold text-xs text-white">💬 NextChat / Chatbox</span>
-                <button @click="copyText(API, '已复制 NextChat 接口地址 (不带 /v1)!')" class="btn-sm text-[10px] py-0.5 px-2">复制地址</button>
-              </div>
-              <div class="text-[11px] text-slate-400 space-y-0.5 font-mono">
-                <div>NextChat: <span class="text-indigo-300">{{API}}</span></div>
-                <div>Chatbox: <span class="text-indigo-300">{{apiBaseUrl}}</span></div>
-              </div>
-            </div>
-            <!-- 沉浸式翻译 -->
-            <div class="p-3 bg-surface-800/80 rounded-lg border border-slate-700/70 space-y-2">
-              <div class="flex items-center justify-between">
-                <span class="font-bold text-xs text-white">🌐 沉浸式翻译</span>
-                <button @click="copyText(apiBaseUrl, '已复制沉浸式翻译接口地址!')" class="btn-sm text-[10px] py-0.5 px-2">复制地址</button>
-              </div>
-              <div class="text-[11px] text-slate-400 space-y-0.5 font-mono">
-                <div>自定义地址: <span class="text-indigo-300">{{apiBaseUrl}}</span></div>
-                <div>模型名称: <span class="text-emerald-300">doubao</span></div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- STEP 3: 在线快速测试与连通性验证 -->
-      <div class="card border border-slate-700 space-y-4">
-        <div class="flex items-center justify-between border-b border-slate-800 pb-3">
-          <div class="flex items-center gap-2.5">
-            <span class="w-6 h-6 rounded-full bg-blue-600 text-white text-xs font-bold flex items-center justify-center">3</span>
-            <h2 class="text-sm font-bold text-white">在线快速测试与连通性验证</h2>
-          </div>
-          <span class="text-xs text-slate-400">即测即用，实时打字机流式验证</span>
-        </div>
-
-        <div class="space-y-3">
-          <div class="flex flex-col sm:flex-row gap-3">
-            <div class="w-full sm:w-60 shrink-0">
-              <label class="text-xs text-slate-400 block mb-1">测试模型</label>
-              <select v-model="test.model" class="w-full text-xs">
-                <option value="doubao-2.1-turbo">doubao-2.1-turbo (极速响应，推荐)</option>
-                <option value="doubao-think">doubao-think (深度思考链)</option>
-                <option value="doubao-2.1-pro">doubao-2.1-pro (2.1 专业版)</option>
-                <option value="doubao-2.1">doubao-2.1 (2.1 标准版)</option>
-                <option value="doubao-expert">doubao-expert (专家模式)</option>
-              </select>
-            </div>
-            <div class="flex-1">
-              <label class="text-xs text-slate-400 block mb-1">输入测试提示词 (Prompt)</label>
-              <div class="flex gap-2">
-                <input v-model="test.prompt" @keyup.enter="runTest" type="text" class="flex-1 text-xs" placeholder="输入测试问题..." />
-                <button @click="runTest" :disabled="test.loading||!test.prompt.trim()" class="btn btn-primary text-xs px-5 font-semibold shrink-0">
-                  {{test.loading?'正在生成...':'🚀 发送测试'}}
-                </button>
-              </div>
-            </div>
-          </div>
-
-          <!-- 测试输出区域 -->
-          <div v-if="test.output || test.thinking || test.error || test.loading" class="mt-3 p-4 rounded-xl bg-surface-900 border border-slate-700/80 space-y-2.5">
-            <div class="flex items-center justify-between text-xs text-slate-400 border-b border-slate-800 pb-2">
-              <div class="flex items-center gap-2">
-                <span class="font-bold text-white font-mono">{{test.model}}</span>
-                <span v-if="test.ms" class="text-indigo-400 font-mono">耗时 {{test.ms}}ms</span>
-              </div>
-              <span v-if="test.loading" class="text-emerald-400 animate-pulse font-mono">● 正在流式生成中...</span>
-              <span v-else-if="test.output && !test.error" class="text-emerald-400">✓ 生成完毕</span>
-            </div>
-
-            <!-- 深度思考内容 (如果存在) -->
-            <div v-if="test.thinking" class="p-3 rounded-lg bg-indigo-950/30 border border-indigo-800/40 text-xs text-indigo-300">
-              <div class="font-bold mb-1 flex items-center gap-1.5">
-                <span>🧠</span> 深度思考过程 (Reasoning):
-              </div>
-              <div class="font-mono whitespace-pre-wrap leading-relaxed opacity-90 text-[11px]">{{test.thinking}}</div>
-            </div>
-
-            <!-- 正文输出 -->
-            <div v-if="test.output" class="text-xs text-slate-200 leading-relaxed whitespace-pre-wrap font-sans">
-              {{test.output}}
-            </div>
-
-            <!-- 错误提示 -->
-            <div v-if="test.error" class="text-xs text-rose-400 font-bold p-2.5 rounded bg-rose-950/40 border border-rose-800/50">
-              ⚠️ {{test.error}}
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- 底部折叠区：⚙️ 高级底层状态与系统设置 -->
-      <div class="border border-slate-800 rounded-xl overflow-hidden bg-surface-900/40">
-        <button @click="showAdvanced=!showAdvanced" class="w-full p-4 flex items-center justify-between text-left text-xs font-bold text-slate-400 hover:text-slate-200 transition-colors">
-          <span class="flex items-center gap-2">
-            <span>⚙️</span>
-            <span>高级底层状态与开发者设置（点击{{showAdvanced?'折叠':'展开'}}）</span>
-          </span>
-          <span class="text-slate-500 text-sm">{{showAdvanced ? '▲' : '▼'}}</span>
-        </button>
-
-        <div v-show="showAdvanced" class="p-4 border-t border-slate-800/80 space-y-4 bg-surface-900/80 text-xs">
-          <!-- 包含之前的浏览器环境卡片与底层操作 -->
-          <div class="grid grid-cols-1 md:grid-cols-4 gap-3">
-            <div class="p-3 bg-surface-800 rounded-lg border border-slate-700">
-              <div class="text-slate-400 mb-1">浏览器底层引擎</div>
-              <div class="font-bold text-white flex items-center gap-2">
-                <span>🖥️ 原生桌面窗口</span>
-                <span class="badge bg-indigo-900/60 text-indigo-300 border border-indigo-700/50 capitalize">{{browserMode.browserName || 'Chrome/Edge'}}</span>
-              </div>
-              <p class="text-[11px] text-slate-500 mt-1">全时有头窗口模式，支持任务栏最小化与后台防降频保护。</p>
-            </div>
-            <div class="p-3 bg-surface-800 rounded-lg border border-slate-700">
-              <div class="text-slate-400 mb-1">窗口快捷控制</div>
-              <div class="flex items-center gap-2 mt-1">
-                <button @click="forceWindow" :disabled="windowActionLoading" class="btn-sm text-xs">
-                  {{windowActionLoading?'正在置顶...':'前台置顶窗口'}}
-                </button>
-                <button @click="toggleScreenshot" class="btn-sm text-xs">
-                  {{showScreenshot?'收起画面':'查看实时截图'}}
-                </button>
-              </div>
-              <p class="text-[11px] text-slate-500 mt-1">可将后台浏览器呼出到前台，或在控制台直接查看渲染画面。</p>
-            </div>
-            <div class="p-3 bg-surface-800 rounded-lg border border-slate-700">
-              <div class="text-slate-400 mb-1">通用独立浏览器</div>
-              <div class="mt-1">
-                <button @click="installChromium" :disabled="installingChromium" class="btn-sm text-xs border border-indigo-700 text-indigo-300 hover:text-white">
-                  {{installingChromium?'正在下载安装...':'📥 安装通用 Chromium'}}
-                </button>
-              </div>
-              <p class="text-[11px] text-slate-500 mt-1">Playwright 官方独立免安装 Chromium，不依赖电脑 Chrome。</p>
-            </div>
-            <div class="p-3 bg-surface-800 rounded-lg border border-slate-700">
-              <div class="text-slate-400 mb-1">风控拦截重置</div>
-              <div class="mt-1">
-                <button @click="resetCaptcha" class="btn-sm text-xs border border-amber-700 text-amber-300 hover:text-white">
-                  🔄 一键解除拦截标志
-                </button>
-              </div>
-              <p class="text-[11px] text-slate-500 mt-1">若偶发误判安全验证标志，可点击立即恢复 API 畅通。</p>
-            </div>
-          </div>
-
-          <!-- 后台实时截图 (如果展开) -->
-          <div v-if="showScreenshot" class="p-3 rounded-lg bg-surface-950 border border-slate-700 space-y-2">
-            <div class="flex items-center justify-between">
-              <span class="text-slate-300 font-medium">后台浏览器实时画面：</span>
-              <button @click="refreshScreenshot" :disabled="screenshot.loading" class="btn-sm text-xs">
-                {{screenshot.loading?'截图中...':'🔄 刷新截图'}}
-              </button>
-            </div>
-            <div v-if="screenshot.img" class="flex flex-col items-center">
-              <img :src="screenshot.img" class="max-h-72 rounded border border-slate-700 shadow" />
-              <span class="text-[10px] text-slate-500 mt-1 font-mono">截取时间: {{screenshot.time}}</span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-    </section>
-
-    <!-- TAB 1: API 调试测试 -->
-    <section v-show="activeTab===1" class="space-y-6">
-      <div class="card">
-        <div class="grid md:grid-cols-4 gap-4 mb-4">
-          <div>
-            <label class="text-xs text-slate-400 block mb-1.5 font-medium">选择模型 (Model)</label>
-            <select v-model="test.model" class="w-full text-xs">
-              <option value="doubao-2.1-turbo">doubao-2.1-turbo (极速响应，推荐)</option>
-              <option value="doubao-think">doubao-think (深度思考链，强推理)</option>
-              <option value="doubao-2.1-pro">doubao-2.1-pro (2.1 专业版)</option>
-              <option value="doubao-2.1">doubao-2.1 (2.1 标准版)</option>
-              <option value="doubao-expert">doubao-expert (专家深度推理)</option>
-              <option value="doubao-2.1-think">doubao-2.1-think (2.1 思考版)</option>
-            </select>
-          </div>
-          <div>
-            <label class="text-xs text-slate-400 block mb-1.5 font-medium">思考深度 (Reasoning)</label>
-            <select v-model="test.reasoningEffort" class="w-full text-xs">
-              <option value="auto">默认 (跟随模型推荐)</option>
-              <option value="high">强制开启深度思考 (high)</option>
-              <option value="none">强制关闭思考 (none)</option>
-            </select>
-          </div>
-          <div>
-            <label class="text-xs text-slate-400 block mb-1.5 font-medium">传输方式 (Stream)</label>
-            <select v-model="test.stream" class="w-full text-xs">
-              <option :value="true">流式打字输出 (Stream)</option>
-              <option :value="false">单次完整输出 (Block)</option>
-            </select>
-          </div>
-          <div class="flex items-end">
-            <button @click="runTest" :disabled="test.loading" class="btn btn-primary w-full py-2.5 text-sm font-bold shadow-lg">
-              {{test.loading?'正在处理响应...':'🚀 发送测试'}}
-            </button>
-          </div>
-        </div>
-
-        <!-- Quick prompt tags -->
-        <div class="flex items-center gap-2 mb-3 text-xs">
-          <span class="text-slate-400">快速示例:</span>
-          <button @click="test.prompt='9.11和9.8哪个大？请简要推理说明。'" class="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-indigo-300">9.11与9.8比大小</button>
-          <button @click="test.prompt='写一段优雅易懂的 Python 快速排序代码并给出注释。'" class="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-indigo-300">快速排序代码</button>
-          <button @click="test.prompt='用一句话幽默地向大家介绍你自己。'" class="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-indigo-300">幽默自我介绍</button>
-        </div>
-
-        <div class="mb-4">
-          <label class="text-xs text-slate-400 block mb-1.5 font-medium">测试内容 (Prompt)</label>
-          <textarea v-model="test.prompt" rows="3" class="w-full text-sm font-sans" placeholder="输入测试内容..."></textarea>
-        </div>
-
-        <!-- Thinking Chain Accordion -->
-        <div v-if="test.thinking" class="mb-4">
-          <div @click="test.thinkOpen=!test.thinkOpen" class="flex items-center gap-2 cursor-pointer select-none mb-2">
-            <svg :class="['w-4 h-4 transition-transform text-purple-400', test.thinkOpen?'rotate-90':'']" fill="currentColor" viewBox="0 0 20 20"><path d="M6 4l8 6-8 6V4z"/></svg>
-            <span class="text-xs font-bold text-purple-400">🧠 深度思维链 (Thinking Process - {{test.thinking.length}} 字)</span>
-          </div>
-          <div v-show="test.thinkOpen" class="thinking-box rounded-lg p-4">
-            <pre class="out text-purple-200 text-xs leading-relaxed font-sans">{{test.thinking}}</pre>
-          </div>
-        </div>
-
-        <!-- Output Box -->
-        <div v-if="test.output" class="mt-4">
-          <div class="flex items-center justify-between mb-2">
-            <span class="text-xs text-slate-400 font-semibold">回复内容 (Answer)</span>
-            <span class="text-xs text-brand-400 font-mono font-bold">{{test.ms}}ms</span>
-          </div>
-          <pre class="out bg-surface-900 text-emerald-300 p-4 rounded-lg text-sm border border-slate-700 font-sans leading-relaxed">{{test.output}}</pre>
-        </div>
-
-        <div v-if="test.error" class="mt-4 p-4 bg-rose-950/40 border border-rose-800/80 rounded-lg text-rose-300 text-xs leading-relaxed">
-          <span class="font-bold">❌ 请求失败：</span>{{test.error}}
-        </div>
-      </div>
-
-      <!-- 最近多媒体生成画廊 (P2: Media Gallery) -->
-      <div class="card space-y-4">
-        <div class="flex items-center justify-between border-b border-slate-800 pb-3">
-          <div class="flex items-center gap-2">
-            <span class="text-base">🎨</span>
-            <div>
-              <h3 class="text-sm font-bold text-white">最近多媒体生成画廊（图生图 / 文生图 / 视频）</h3>
-              <p class="text-xs text-slate-400 mt-0.5">展示最近通过 API 生成的图片与视频预览（保留最近 30 条记录）</p>
-            </div>
-          </div>
-          <button @click="fetchRecentMedia" class="btn-sm text-xs">🔄 刷新画廊</button>
-        </div>
-
-        <div v-if="recentMedia.length" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-          <div v-for="item in recentMedia" :key="item.id" class="p-3 bg-surface-900/80 rounded-xl border border-slate-800 space-y-2 flex flex-col justify-between">
-            <div class="space-y-1.5">
-              <div class="flex items-center justify-between text-[11px] text-slate-400">
-                <span class="px-1.5 py-0.5 rounded text-[10px] font-mono font-bold" :class="item.type==='video'?'bg-purple-900/60 text-purple-300':'bg-emerald-900/60 text-emerald-300'">
-                  {{item.type === 'video' ? '🎬 视频' : '🖼️ 图片'}}
-                </span>
-                <span class="font-mono">{{fmtTime(item.created_at)}}</span>
-              </div>
-              <p class="text-xs text-slate-200 line-clamp-2 leading-relaxed" :title="item.prompt">{{item.prompt}}</p>
-            </div>
-            <div class="mt-2 rounded-lg overflow-hidden border border-slate-700/60 bg-black/40 flex items-center justify-center min-h-[120px]">
-              <template v-if="item.type==='image'">
-                <img :src="item.url" class="max-h-48 w-full object-cover cursor-pointer hover:opacity-90" @click="window.open(item.url, '_blank')" />
-              </template>
-              <template v-else-if="item.type==='video'">
-                <video :src="item.url" :poster="item.cover_url" controls class="max-h-48 w-full"></video>
-              </template>
-            </div>
-            <div class="flex items-center justify-between pt-1 text-[11px]">
-              <span class="text-slate-500 font-mono">{{item.model || '-'}}</span>
-              <button @click="copyText(item.url, '已复制媒体 URL!')" class="btn-sm text-[10px] py-0.5 px-2">复制链接</button>
-            </div>
-          </div>
-        </div>
-        <div v-else class="py-8 text-center text-xs text-slate-500">
-          暂无多媒体生成记录。通过 <code>/v1/images/generations</code> 或 <code>/v1/video/generations</code> 生成后将在此自动展示。
-        </div>
-      </div>
-    </section>
-
-    <!-- TAB 2: 账号池管理 -->
-    <section v-show="activeTab===2" class="space-y-6">
-      <div class="card space-y-4">
-        <div class="flex items-center justify-between border-b border-slate-800 pb-3">
-          <div>
-            <h3 class="text-base font-bold text-white flex items-center gap-2">
-              <span>👥 豆包账号池与自动轮换</span>
-              <span class="text-xs font-normal px-2 py-0.5 rounded-full border border-indigo-500/40 bg-indigo-950/40 text-indigo-300">
-                共 {{accounts.length}} 个账号
-              </span>
-            </h3>
-            <p class="text-xs text-slate-400 mt-0.5">支持多账号管理、视频/深度推理额度耗尽自动切换（Failover）与轮询调度（Round-Robin）</p>
-          </div>
-          <div class="flex items-center gap-2">
-            <button @click="probeAllAccounts" :disabled="accountActionLoading || probingAccounts" class="btn-sm bg-sky-600/80 hover:bg-sky-500 text-white">
-              {{probingAccounts ? '⏳ 正在全量巡检...' : '🔍 一键巡检全部账号'}}
-            </button>
-            <button @click="saveCurrentAsAccount" :disabled="accountActionLoading" class="btn-sm bg-emerald-600/80 hover:bg-emerald-500 text-white">
-              💾 保存当前登录为账号
-            </button>
-            <button @click="showAddAccountModal=true" class="btn-sm btn-primary">
-              ➕ 导入新账号
-            </button>
-            <button @click="fetchAccounts" :disabled="accountActionLoading" class="btn-sm">
-              🔄 刷新
-            </button>
-          </div>
-        </div>
-
-        <!-- Strategy Selector -->
-        <div class="flex items-center justify-between p-3.5 bg-surface-900/60 rounded-xl border border-slate-800 text-xs">
-          <div class="flex items-center gap-2">
-            <span class="text-slate-400 font-medium">账号轮换策略：</span>
-            <span class="text-slate-300">{{accountStrategy === 'failover' ? '故障/额度切换（优先主账号，额度耗尽自动切换备用）' : '轮询调度（请求均匀分摊到所有账号）'}}</span>
-          </div>
+      <!-- Step B: Active Isolated Web LiveView -->
+      <div v-else class="flex-1 flex flex-col overflow-hidden p-4 space-y-3">
+        <!-- LiveView Controls -->
+        <div class="flex flex-wrap items-center justify-between gap-2">
           <div class="flex items-center gap-1.5">
-            <button @click="setStrategy('failover')" :class="['px-3 py-1 rounded text-xs font-medium transition', accountStrategy==='failover'?'bg-indigo-600 text-white font-bold':'bg-slate-800 text-slate-400 hover:text-white']">
-              故障切换 (Failover)
-            </button>
-            <button @click="setStrategy('round_robin')" :class="['px-3 py-1 rounded text-xs font-medium transition', accountStrategy==='round_robin'?'bg-indigo-600 text-white font-bold':'bg-slate-800 text-slate-400 hover:text-white']">
-              轮询调度 (Round-Robin)
-            </button>
-          </div>
-        </div>
-
-        <!-- Accounts Table -->
-        <div class="overflow-x-auto">
-          <table class="w-full text-sm">
-            <thead>
-              <tr class="text-left text-xs text-slate-500 border-b border-slate-700">
-                <th class="py-2.5 px-3">账号名称</th>
-                <th class="py-2.5 px-3">状态</th>
-                <th class="py-2.5 px-3">视频额度</th>
-                <th class="py-2.5 px-3">Cookie凭证</th>
-                <th class="py-2.5 px-3">最后活跃</th>
-                <th class="py-2.5 px-3 text-right">操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="acc in accounts" :key="acc.id" class="border-b border-slate-800 hover:bg-slate-800/40 transition-colors">
-                <td class="py-3 px-3">
-                  <div class="flex items-center gap-2">
-                    <span class="font-medium text-white">{{acc.name}}</span>
-                    <button @click="openRenameModal(acc)" class="text-slate-400 hover:text-indigo-300 text-xs" title="修改账号备注">✏️</button>
-                    <span v-if="acc.is_active" class="px-2 py-0.5 rounded-full text-xs bg-emerald-950/80 text-emerald-400 border border-emerald-800 font-bold">
-                      当前使用中
-                    </span>
-                  </div>
-                  <div class="text-xs text-slate-500 font-mono">ID: {{acc.id}}</div>
-                </td>
-                <td class="py-3 px-3">
-                  <span v-if="acc.status==='active'" class="badge bg-emerald-950/60 text-emerald-400 border border-emerald-800/50">正常活跃</span>
-                  <span v-else-if="acc.status==='quota_exceeded'" class="badge bg-amber-950/60 text-amber-400 border border-amber-800/50">今日额度耗尽</span>
-                  <span v-else-if="acc.status==='captcha'" class="badge bg-orange-950/60 text-orange-400 border border-orange-800/50">⚠️ 待验证码 (Captcha)</span>
-                  <span v-else-if="acc.status==='invalid'" class="badge bg-rose-950/60 text-rose-400 border border-rose-800/50">Cookie 已失效</span>
-                  <span v-else class="badge bg-slate-800 text-slate-300 border border-slate-700">{{acc.status}}</span>
-                </td>
-                <td class="py-3 px-3 text-xs font-mono">
-                  <span :class="acc.video_quota_exceeded?'text-amber-400':'text-slate-300'">
-                    {{acc.video_quota_exceeded ? '已达上限 (次日重置)' : '正常可用'}}
-                  </span>
-                </td>
-                <td class="py-3 px-3 text-xs font-mono text-slate-400">
-                  {{acc.has_sessionid ? '已绑定 sessionid' : '未检测到会话'}}
-                </td>
-                <td class="py-3 px-3 text-xs font-mono text-slate-400">
-                  {{acc.last_used ? fmtTime(acc.last_used) : '从未'}}
-                </td>
-                <td class="py-3 px-3 text-right space-x-2">
-                  <button v-if="!acc.is_active" @click="switchAccount(acc.id)" :disabled="accountActionLoading" class="btn-sm bg-indigo-600/70 hover:bg-indigo-500 text-white">
-                    切换到此账号
-                  </button>
-                  <button v-if="acc.status==='captcha'" @click="clearCaptcha(acc.id)" :disabled="accountActionLoading" class="btn-sm bg-orange-600/80 hover:bg-orange-500 text-white" title="清除该账号的人机验证标记并恢复正常">
-                    解除验证
-                  </button>
-                  <button v-if="acc.video_quota_exceeded" @click="resetQuota(acc.id)" :disabled="accountActionLoading" class="btn-sm bg-amber-600/70 hover:bg-amber-500 text-white" title="手动清除今日额度已耗尽标记">
-                    重置额度
-                  </button>
-                  <button @click="deleteAccount(acc.id)" :disabled="accountActionLoading" class="btn-sm bg-rose-900/60 hover:bg-rose-700 text-rose-200">
-                    删除
-                  </button>
-                </td>
-              </tr>
-              <tr v-if="!accounts.length">
-                <td colspan="6" class="py-8 text-center text-slate-500">
-                  账号池为空。点击上方【保存当前登录为账号】或【导入新账号】添加你的第一个备用账号。
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </section>
-
-    <!-- TAB 3: 系统信息与配置 -->
-    <section v-show="activeTab===3" class="space-y-6">
-      <div class="card space-y-4">
-        <div class="flex items-center justify-between border-b border-slate-800 pb-3">
-          <div>
-            <h3 class="text-base font-bold text-white">⚙️ 服务器运行环境与参数</h3>
-            <p class="text-xs text-slate-400 mt-0.5">跨机器部署与配置状态实时监控</p>
-          </div>
-          <button @click="fetchSystem" class="btn-sm">🔄 刷新</button>
-        </div>
-
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
-          <div class="p-3.5 bg-surface-900/60 rounded-xl border border-slate-800">
-            <div class="text-slate-400 mb-1">操作系统 / 平台</div>
-            <div class="text-sm font-semibold font-mono text-white">{{serverInfo.platform || '检测中...'}}</div>
-          </div>
-          <div class="p-3.5 bg-surface-900/60 rounded-xl border border-slate-800">
-            <div class="text-slate-400 mb-1">Python 运行版本</div>
-            <div class="text-sm font-semibold font-mono text-white truncate" :title="serverInfo.python_version">{{serverInfo.python_version ? serverInfo.python_version.split(' ')[0] : '检测中...'}}</div>
-          </div>
-          <div class="p-3.5 bg-surface-900/60 rounded-xl border border-slate-800">
-            <div class="text-slate-400 mb-1">服务连续运行时长</div>
-            <div class="text-sm font-semibold font-mono text-indigo-300">{{fmtDur(serverInfo.uptime_seconds)}}</div>
-          </div>
-          <div class="p-3.5 bg-surface-900/60 rounded-xl border border-slate-800">
-            <div class="text-slate-400 mb-1">监听地址与端口</div>
-            <div class="text-sm font-semibold font-mono text-white">{{serverInfo.host}}:{{serverInfo.port}}</div>
-          </div>
-          <div class="p-3.5 bg-surface-900/60 rounded-xl border border-slate-800">
-            <div class="text-slate-400 mb-1">每分钟请求限制 (RPM)</div>
-            <div class="text-sm font-semibold font-mono text-emerald-400">{{serverInfo.rpm_limit || 20}} 次/分</div>
-          </div>
-          <div class="p-3.5 bg-surface-900/60 rounded-xl border border-slate-800 flex justify-between items-center">
-            <div>
-              <div class="text-slate-400 mb-1">会话留存模式 (即用即焚 / 网页端历史)</div>
-              <div class="text-sm font-semibold font-mono" :class="serverInfo.auto_delete_conv?'text-emerald-400':'text-amber-400'">
-                {{serverInfo.auto_delete_conv ? '已开启即焚 (临时对话，不污染网页)' : '已关闭即焚 (生图/视频同步保存至网页端)'}}
-              </div>
-            </div>
-            <button @click="toggleAutoDelete" class="px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors cursor-pointer"
-              :class="serverInfo.auto_delete_conv ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 hover:bg-amber-500/30' : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40 hover:bg-emerald-500/30'">
-              {{serverInfo.auto_delete_conv ? '切换为：留存网页' : '切换为：即用即焚'}}
-            </button>
-          </div>
-        </div>
-
-        <div class="pt-2">
-          <h4 class="text-xs font-bold text-slate-300 mb-2">已注册支持的模型清单：</h4>
-          <div class="flex flex-wrap gap-2">
-            <span v-for="m in (serverInfo.models?.chat || [])" :key="m" class="px-2.5 py-1 rounded-md bg-indigo-950/50 border border-indigo-800/60 text-indigo-300 font-mono text-xs">
-              {{m}}
-            </span>
-            <span v-for="m in (serverInfo.models?.image || [])" :key="m" class="px-2.5 py-1 rounded-md bg-emerald-950/50 border border-emerald-800/60 text-emerald-300 font-mono text-xs">
-              {{m}}
+            <button @click="sendSessionInput({type:'navigate',action:'back'})" class="btn btn-sm">← 后退</button>
+            <button @click="sendSessionInput({type:'navigate',action:'reload'})" class="btn btn-sm">⟳ 刷新</button>
+            <button @click="sendSessionInput({type:'navigate',url:'https://www.dola.com/chat/'})" class="btn btn-sm">🏠 Dola</button>
+            <span v-if="browserModal.proxyMasked" class="text-[11px] font-mono text-indigo-300 px-2 py-1 rounded bg-indigo-950/50 border border-indigo-800/40">
+              代理: {{browserModal.proxyMasked}}
             </span>
           </div>
+
+          <div class="flex items-center gap-2">
+            <input v-model="browserModal.textInput" @keyup.enter="sendSessionText" class="input py-1 text-xs w-48" placeholder="输入文本/邮箱后按回车...">
+            <button @click="sendSessionText" class="btn btn-sm">发送文本</button>
+            <button @click="saveBrowserSession" class="btn btn-sm btn-emerald">
+              💾 {{browserModal.mode==='add' ? '完成并保存账号' : '同步凭证并关闭'}}
+            </button>
+            <button @click="cancelBrowserSession" class="btn btn-sm btn-danger">取消</button>
+          </div>
+        </div>
+
+        <!-- LiveView Canvas -->
+        <div class="flex-1 bg-black rounded-xl border border-slate-800 flex items-center justify-center overflow-hidden relative min-h-[420px]">
+          <img v-if="browserModal.frameB64"
+            ref="liveViewImg"
+            :src="'data:image/jpeg;base64,' + browserModal.frameB64"
+            tabindex="0"
+            draggable="false"
+            @mousedown="onLiveMouse($event,'down')"
+            @mouseup="onLiveMouse($event,'up')"
+            @mousemove="onLiveMouseMove($event)"
+            @wheel.prevent="onLiveWheel($event)"
+            @keydown.prevent="onLiveKey($event,'down')"
+            @keyup.prevent="onLiveKey($event,'up')"
+            class="max-w-full max-h-[64vh] select-none cursor-crosshair outline-none">
+          <div v-else class="text-center space-y-2 p-8">
+            <div class="text-sm text-slate-300">⏳ {{browserModal.message || '正在连接 Camoufox Web LiveView...'}}</div>
+            <div class="text-xs text-slate-500">画面就绪后可直接点击、滚轮、输入账号密码或扫码</div>
+          </div>
+          <div v-if="browserModal.loggedInDetected"
+            class="absolute top-3 left-3 px-3 py-1 rounded-full bg-emerald-600/90 text-white text-xs font-semibold shadow">
+            ✅ 已检测到 Dola 登录会话{{browserModal.mode==='add' ? '（即将自动入池保存...）' : ''}}
+          </div>
+        </div>
+
+        <div class="flex items-center justify-between text-[11px] text-slate-500 font-mono">
+          <span class="truncate max-w-[70%]">{{browserModal.pageUrl || 'https://www.dola.com/chat/'}}</span>
+          <span>点击画布聚焦键盘 · 支持粘贴发送文本</span>
         </div>
       </div>
-    </section>
+    </div>
+  </div>
 
-    <!-- TAB 4: 请求日志 -->
-    <section v-show="activeTab===4">
-      <div class="card">
-        <div class="flex items-center justify-between mb-4">
-          <span class="text-xs text-slate-400">最近 100 条请求调用记录 (每 5 秒自动刷新)</span>
-          <button @click="fetchLogs" class="btn-sm">🔄 刷新</button>
-        </div>
-        <div class="overflow-x-auto">
-          <table class="w-full text-sm">
-            <thead>
-              <tr class="text-left text-xs text-slate-500 border-b border-slate-700">
-                <th class="py-2.5 px-3">时间</th>
-                <th class="py-2.5 px-3">方法</th>
-                <th class="py-2.5 px-3">路径</th>
-                <th class="py-2.5 px-3">模型</th>
-                <th class="py-2.5 px-3">状态</th>
-                <th class="py-2.5 px-3">耗时</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="(l,i) in logs" :key="i" class="border-b border-slate-800 hover:bg-slate-800/40 transition-colors">
-                <td class="py-2 px-3 text-slate-400 font-mono text-xs">{{fmtTime(l.ts)}}</td>
-                <td class="py-2 px-3">
-                  <span class="px-1.5 py-0.5 rounded text-xs font-mono font-medium" :class="l.method==='POST'?'bg-amber-900/40 text-amber-300':'bg-blue-900/40 text-blue-300'">{{l.method}}</span>
-                </td>
-                <td class="py-2 px-3 font-mono text-xs text-slate-300">{{l.path}}</td>
-                <td class="py-2 px-3 text-xs font-mono text-brand-400">{{l.model||'-'}}</td>
-                <td class="py-2 px-3 font-mono font-semibold" :class="l.status<400?'text-emerald-400':'text-rose-400'">{{l.status}}</td>
-                <td class="py-2 px-3 text-slate-400 font-mono text-xs">{{l.ms}}ms</td>
-              </tr>
-              <tr v-if="!logs.length"><td colspan="6" class="py-8 text-center text-slate-500">暂无请求记录</td></tr>
-            </tbody>
-          </table>
-        </div>
+  <!-- =================================================================== -->
+  <!-- MODAL 2: 导入 Cookie 新增账号（支持指定代理）                         -->
+  <!-- =================================================================== -->
+  <div v-if="showImportModal" class="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+    <div class="bg-surface-850 border border-slate-700/80 rounded-2xl w-full max-w-lg p-6 space-y-4 shadow-2xl">
+      <div class="flex items-center justify-between">
+        <h3 class="text-sm font-bold text-white">➕ 导入 Cookie 新增 Dola 账号</h3>
+        <button @click="showImportModal=false" class="btn btn-sm">✕</button>
       </div>
-    </section>
-
-  </div>
-</div>
-
-<!-- API Key Configuration Modal -->
-<div v-if="showKeyModal" class="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
-  <div class="bg-surface-900 border border-slate-700 rounded-xl p-6 max-w-md w-full shadow-2xl space-y-4">
-    <div class="flex items-center justify-between">
-      <h3 class="text-base font-bold text-white flex items-center gap-2">
-        <span>🔑 配置 API 访问密钥</span>
-      </h3>
-      <button @click="showKeyModal=false" class="text-slate-400 hover:text-white">✕</button>
-    </div>
-    <p class="text-xs text-slate-400 leading-relaxed">
-      当服务器环境变量设置了 <code class="text-indigo-300 font-mono">DOUBAO_API_KEY</code> 时，网页控制台与所有 API 请求均需携带该密钥。
-    </p>
-    <div class="space-y-1.5">
-      <label class="text-xs text-slate-400 font-medium">当前 API Key</label>
-      <input v-model="keyInput" type="text" class="w-full text-xs font-mono" placeholder="留空则表示不鉴权..." />
-    </div>
-    <div class="flex justify-end gap-2 pt-2">
-      <button @click="showKeyModal=false" class="btn-sm">取消</button>
-      <button @click="saveApiKey" class="btn btn-primary btn-sm">保存密钥</button>
+      <div class="space-y-3">
+        <div>
+          <label class="text-xs text-slate-400">账号名称</label>
+          <input v-model="importForm.name" class="input mt-1" placeholder="例如：Dola-备用号">
+        </div>
+        <div>
+          <label class="text-xs text-slate-400">专属代理（可选）</label>
+          <input v-model="importForm.proxy_url" class="input mt-1 font-mono text-xs" placeholder="socks5://user:pass@ip:port 或留空">
+        </div>
+        <div>
+          <label class="text-xs text-slate-400">Cookie 内容（需含 sessionid / sid_tt）</label>
+          <textarea v-model="importForm.cookies" rows="4" class="input mt-1 font-mono text-xs" placeholder="粘贴 Cookie 字符串或 JSON..."></textarea>
+        </div>
+        <div v-if="importForm.error" class="text-xs text-rose-400">{{importForm.error}}</div>
+      </div>
+      <div class="flex justify-end gap-2">
+        <button @click="showImportModal=false" class="btn">取消</button>
+        <button @click="submitImportAccount" :disabled="importForm.loading" class="btn btn-primary">
+          {{importForm.loading ? '导入中...' : '确认导入'}}
+        </button>
+      </div>
     </div>
   </div>
-</div>
 
-<!-- Add Account Modal -->
-<div v-if="showAddAccountModal" class="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
-  <div class="bg-surface-900 border border-slate-700 rounded-xl p-6 max-w-lg w-full shadow-2xl space-y-4">
-    <div class="flex items-center justify-between">
-      <h3 class="text-base font-bold text-white flex items-center gap-2">
-        <span>➕ 导入并添加豆包账号</span>
-      </h3>
-      <button @click="showAddAccountModal=false" class="text-slate-400 hover:text-white">✕</button>
-    </div>
-    <p class="text-xs text-slate-400 leading-relaxed">
-      输入账号自定义名称及已登录豆包的 Cookie（支持直接粘贴整串 Cookie、包含 sessionid 的 JSON 或直接填 sessionid 值）。
-    </p>
-    <div class="space-y-1.5">
-      <label class="text-xs text-slate-400 font-medium">账号名称（备注）</label>
-      <input v-model="newAccount.name" type="text" class="w-full text-xs" placeholder="例如：备用小号1" />
-    </div>
-    <div class="space-y-1.5">
-      <label class="text-xs text-slate-400 font-medium">Cookie 字符串 / JSON</label>
-      <textarea v-model="newAccount.cookies" rows="5" class="w-full text-xs font-mono" placeholder="粘贴 sessionid=xxx; 或整段 Cookie..."></textarea>
-    </div>
-    <div v-if="newAccountError" class="p-2.5 rounded bg-rose-950/60 border border-rose-800 text-rose-300 text-xs">
-      {{newAccountError}}
-    </div>
-    <div class="flex justify-end gap-2 pt-2">
-      <button @click="showAddAccountModal=false" class="btn-sm">取消</button>
-      <button @click="addAccount" :disabled="newAccountLoading" class="btn btn-primary btn-sm">
-        {{newAccountLoading ? '保存中...' : '确认添加'}}
-      </button>
+  <!-- =================================================================== -->
+  <!-- MODAL 3: 编辑账号名称 & 专属代理                                      -->
+  <!-- =================================================================== -->
+  <div v-if="editModal.open" class="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+    <div class="bg-surface-850 border border-slate-700/80 rounded-2xl w-full max-w-md p-6 space-y-4 shadow-2xl">
+      <div class="flex items-center justify-between">
+        <h3 class="text-sm font-bold text-white">✏️ 编辑账号配置</h3>
+        <button @click="editModal.open=false" class="btn btn-sm">✕</button>
+      </div>
+      <div class="space-y-3">
+        <div>
+          <label class="text-xs text-slate-400">账号名称</label>
+          <input v-model="editModal.name" class="input mt-1">
+        </div>
+        <div>
+          <label class="text-xs text-slate-400">专属代理（留空则清除并继承全局/直连）</label>
+          <input v-model="editModal.proxy_url" class="input mt-1 font-mono text-xs"
+            placeholder="http://user:pass@ip:port 或 socks5://... 或 st5 ...">
+        </div>
+        <div v-if="editModal.error" class="text-xs text-rose-400">{{editModal.error}}</div>
+      </div>
+      <div class="flex justify-end gap-2">
+        <button @click="editModal.open=false" class="btn">取消</button>
+        <button @click="saveEditAccount" :disabled="editModal.loading" class="btn btn-primary">
+          {{editModal.loading ? '保存中...' : '保存修改'}}
+        </button>
+      </div>
     </div>
   </div>
-</div>
 
-<!-- Rename Account Modal (P1) -->
-<div v-if="showRenameModal" class="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
-  <div class="bg-surface-900 border border-slate-700 rounded-xl p-6 max-w-sm w-full shadow-2xl space-y-4">
-    <div class="flex items-center justify-between">
-      <h3 class="text-base font-bold text-white flex items-center gap-2">
-        <span>✏️ 重命名账号备注</span>
-      </h3>
-      <button @click="showRenameModal=false" class="text-slate-400 hover:text-white">✕</button>
-    </div>
-    <div class="space-y-1.5">
-      <label class="text-xs text-slate-400 font-medium">账号名称（备注）</label>
-      <input v-model="renameData.name" @keyup.enter="confirmRename" type="text" class="w-full text-xs" placeholder="输入新的账号名称..." />
-    </div>
-    <div class="flex justify-end gap-2 pt-2">
-      <button @click="showRenameModal=false" class="btn-sm">取消</button>
-      <button @click="confirmRename" :disabled="!renameData.name.trim()" class="btn btn-primary btn-sm">保存</button>
+  <!-- =================================================================== -->
+  <!-- MODAL 4: API Key 设置                                                 -->
+  <!-- =================================================================== -->
+  <div v-if="showKeyModal" class="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+    <div class="bg-surface-850 border border-slate-700/80 rounded-2xl w-full max-w-md p-6 space-y-4 shadow-2xl">
+      <div class="flex items-center justify-between">
+        <h3 class="text-sm font-bold text-white">🔑 控制台 API Key 鉴权</h3>
+        <button @click="showKeyModal=false" class="btn btn-sm">✕</button>
+      </div>
+      <p class="text-xs text-slate-400">若服务端配置了 <code>DOLA_API_KEY</code>，请在此填入以访问管理接口。</p>
+      <input v-model="apiKeyInput" type="password" class="input font-mono" placeholder="输入 API Key（留空表示无密钥）">
+      <div class="flex justify-end gap-2">
+        <button @click="showKeyModal=false" class="btn">取消</button>
+        <button @click="saveApiKey" class="btn btn-primary">保存</button>
+      </div>
     </div>
   </div>
-</div>
 
 </div>
 
 <script>
-const { createApp, ref, reactive, computed, onMounted, watch } = Vue;
+const { createApp, ref, reactive, computed, onMounted, onUnmounted } = Vue;
 
 createApp({
-  setup(){
-    const API = window.location.origin;
-    const apiBaseUrl = computed(() => API + '/v1');
-
-    // API Key management
-    const urlParams = new URLSearchParams(window.location.search);
-    const initialKey = urlParams.get('key') || localStorage.getItem('doubao_api_key') || '';
-    if(urlParams.get('key')) {
-      localStorage.setItem('doubao_api_key', urlParams.get('key'));
-    }
-    const apiKey = ref(initialKey);
-    const keyInput = ref(initialKey);
-    const showKeyModal = ref(false);
-
-    function saveApiKey(){
-      apiKey.value = keyInput.value.trim();
-      if(apiKey.value){
-        localStorage.setItem('doubao_api_key', apiKey.value);
-      }else{
-        localStorage.removeItem('doubao_api_key');
-      }
-      showKeyModal.value = false;
-      fetchOverview();
-      fetchLogs();
-    }
-
-    const tabs = ref([
-      { name: '状态与登录' },
-      { name: 'API 调试测试' },
-      { name: '账号池管理' },
-      { name: '系统信息与配置' },
-      { name: '请求日志' }
-    ]);
-
-    const icons = [
-      '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/></svg>',
-      '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>',
-      '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"/></svg>',
-      '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><circle cx="12" cy="12" r="3" stroke-width="2"/></svg>',
-      '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>'
+  setup() {
+    const activeTab = ref(0);
+    const tabs = [
+      { name: '账号管理', icon: '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/></svg>' },
+      { name: 'API 调试与创作', icon: '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>' },
+      { name: '系统配置与模型', icon: '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><circle cx="12" cy="12" r="3" stroke-width="2"/></svg>' },
+      { name: '请求日志', icon: '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>' }
     ];
 
-    const activeTab = ref(0);
-    const session = ref(null);
-    const browserMode = reactive({ headless: false, mode: 'window', browserName: 'chromium' });
-    const modeSwitching = ref(false);
+    const apiKey = ref(localStorage.getItem('dola_api_key') || '');
+    const apiKeyInput = ref(apiKey.value);
+    const showKeyModal = ref(false);
+    const apiBaseUrl = computed(() => `${location.origin}/v1`);
     const currentTime = ref('');
+
+    const session = ref(null);
     const serverInfo = ref({});
+    const autoDeleteConv = ref(true);
 
-    // Cookie import
-    const cookieInput = ref('');
-    const cookieLoading = ref(false);
-    const cookieMessage = ref('');
-
-    // Screenshot & Advanced options
-    const showAdvanced = ref(false);
-    const showScreenshot = ref(false);
-    const screenshot = reactive({ img: '', loading: false, time: '' });
-    const windowActionLoading = ref(false);
-
-    // QR Login
-    const showQrModal = ref(false);
-    const qrState = reactive({
-      img: '',
-      loading: false,
-      status: 'idle',
-      statusText: '等待获取二维码...',
-      error: '',
-      pollTimer: null
-    });
-
-    const qrStatusColor = computed(() => {
-      switch(qrState.status){
-        case 'waiting_scan': case 'qr_ready': return 'text-amber-400';
-        case 'scanned': return 'text-indigo-400';
-        case 'success': case 'confirmed': return 'text-emerald-400';
-        case 'expired': case 'failed': return 'text-rose-400';
-        default: return 'text-slate-300';
-      }
-    });
-
-    const logs = ref([]);
-
-    // Account pool
     const accounts = ref([]);
     const accountStrategy = ref('failover');
     const activeAccountId = ref('');
     const accountActionLoading = ref(false);
-    const showAddAccountModal = ref(false);
-    const newAccount = reactive({ name: '', cookies: '' });
-    const newAccountLoading = ref(false);
-    const newAccountError = ref('');
+    const probingAccounts = ref(false);
 
-    async function fetchAccounts(){
-      try{
+    const activeAccountObj = computed(() => accounts.value.find(a => a.id === activeAccountId.value) || null);
+    const activeAvailableCount = computed(() => accounts.value.filter(a => a.status === 'active').length);
+
+    const proxyState = reactive({ proxy_masked: '', input: '', loading: false, message: '', ok: true });
+    const logs = ref([]);
+    const recentMedia = ref([]);
+
+    // Isolated Browser Login / Manage Profile Modal (Web LiveView)
+    const liveViewImg = ref(null);
+    const browserModal = reactive({
+      open: false,
+      mode: 'add', // 'add' | 'manage'
+      accountId: null,
+      name: '',
+      proxyUrl: '',
+      proxyMasked: '',
+      headless: true,
+      starting: false,
+      sessionId: '',
+      status: '',
+      message: '',
+      error: '',
+      frameB64: '',
+      frameMeta: null,
+      pageUrl: '',
+      loggedInDetected: false,
+      textInput: '',
+      ws: null,
+      mouseDown: false,
+      lastMoveTs: 0,
+    });
+
+    // Import Cookie Modal
+    const showImportModal = ref(false);
+    const importForm = reactive({ name: '', proxy_url: '', cookies: '', loading: false, error: '' });
+
+    // Edit Account Modal
+    const editModal = reactive({ open: false, id: '', name: '', proxy_url: '', loading: false, error: '' });
+
+    // API Playground
+    const testChat = reactive({ model: 'dola', prompt: '', stream: true, loading: false, output: '', thinking: '', error: '', ms: 0 });
+    const testMedia = reactive({
+      imgModel: 'seedream-4.5', imgRatio: 'auto', imgPrompt: '', imgLoading: false, imgError: '',
+      vidModel: 'seedance-2.0-fast', vidDuration: 10, vidPrompt: '', vidLoading: false, vidError: '',
+    });
+
+    async function api(path, opts = {}) {
+      const headers = { ...(opts.headers || {}) };
+      if (!headers['Content-Type'] && opts.body) headers['Content-Type'] = 'application/json';
+      if (apiKey.value) headers['X-API-Key'] = apiKey.value;
+      const resp = await fetch(path, { ...opts, headers });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        throw new Error(data?.error?.message || data?.detail || `HTTP ${resp.status}`);
+      }
+      return data;
+    }
+
+    function saveApiKey() {
+      apiKey.value = apiKeyInput.value.trim();
+      if (apiKey.value) localStorage.setItem('dola_api_key', apiKey.value);
+      else localStorage.removeItem('dola_api_key');
+      showKeyModal.value = false;
+      refreshAll();
+    }
+
+    async function fetchStatus() {
+      try { session.value = await api('/admin/api/status'); } catch {}
+    }
+
+    async function fetchSystem() {
+      try {
+        const d = await api('/admin/api/system');
+        serverInfo.value = d;
+        autoDeleteConv.value = d.auto_delete_conv !== false;
+      } catch {}
+    }
+
+    async function fetchAccounts() {
+      try {
         const d = await api('/admin/api/accounts');
         accounts.value = d.accounts || [];
         accountStrategy.value = d.strategy || 'failover';
         activeAccountId.value = d.active_account_id || '';
-      }catch(e){
-        console.error('fetchAccounts error:', e);
+      } catch {}
+    }
+
+    async function fetchProxyConfig() {
+      try {
+        const d = await api('/admin/api/config/proxy');
+        proxyState.proxy_masked = d.proxy_masked || '';
+      } catch {}
+    }
+
+    async function saveGlobalProxy() {
+      proxyState.loading = true;
+      proxyState.message = '';
+      try {
+        const d = await api('/admin/api/config/proxy', {
+          method: 'POST',
+          body: JSON.stringify({ proxy_url: proxyState.input.trim() }),
+        });
+        proxyState.proxy_masked = d.proxy_masked || '';
+        proxyState.ok = true;
+        proxyState.message = d.proxy_masked ? `已生效：${d.proxy_masked}` : '已切换为直连';
+      } catch (e) {
+        proxyState.ok = false;
+        proxyState.message = e.message;
+      } finally {
+        proxyState.loading = false;
       }
     }
 
-    async function switchAccount(id){
-      accountActionLoading.value = true;
-      try{
-        const r = await api('/admin/api/accounts/switch', {
+    async function toggleAutoDelete() {
+      try {
+        const d = await api('/admin/api/config/auto-delete', {
           method: 'POST',
-          body: JSON.stringify({ account_id: id })
+          body: JSON.stringify({ enabled: !autoDeleteConv.value }),
         });
-        if(r.status === 'ok' && r.success){
-          alert('账号切换成功！');
-          await Promise.all([fetchAccounts(), fetchSession()]);
-        }else{
-          alert('账号切换失败: ' + (r.message || '登录校验未通过'));
-        }
-      }catch(e){
-        alert('操作失败: ' + e.message);
-      }finally{
+        autoDeleteConv.value = !!d.auto_delete_conv;
+      } catch (e) { alert(e.message); }
+    }
+
+    async function setStrategy(s) {
+      try {
+        await api('/admin/api/accounts/strategy', { method: 'POST', body: JSON.stringify({ strategy: s }) });
+        accountStrategy.value = s;
+      } catch (e) { alert(e.message); }
+    }
+
+    async function switchAccount(id) {
+      accountActionLoading.value = true;
+      try {
+        const r = await api('/admin/api/accounts/switch', { method: 'POST', body: JSON.stringify({ account_id: id }) });
+        if (!r.success) alert('切换失败，请点击该账号的「管理资料」重新登录');
+        await Promise.all([fetchAccounts(), fetchStatus()]);
+      } catch (e) {
+        alert(e.message);
+      } finally {
         accountActionLoading.value = false;
       }
     }
 
-    async function saveCurrentAsAccount(){
-      const name = prompt('请输入保存的账号名称:', '账号-' + (accounts.value.length + 1));
-      if(!name) return;
-      accountActionLoading.value = true;
-      try{
-        const r = await api('/admin/api/accounts/save_current', {
-          method: 'POST',
-          body: JSON.stringify({ name })
-        });
-        if(r.status === 'ok'){
-          alert('当前登录已保存至账号池！');
-          await fetchAccounts();
-        }else{
-          alert('保存失败: ' + (r.detail || ''));
-        }
-      }catch(e){
-        alert('保存失败: ' + e.message);
-      }finally{
-        accountActionLoading.value = false;
-      }
+    async function clearAccountCaptcha(id) {
+      try {
+        await api('/admin/api/accounts/clear_captcha', { method: 'POST', body: JSON.stringify({ account_id: id }) });
+        await fetchAccounts();
+      } catch (e) { alert(e.message); }
     }
 
-    async function addAccount(){
-      if(!newAccount.cookies.trim()){
-        newAccountError.value = '请输入 Cookie 内容';
-        return;
-      }
-      newAccountLoading.value = true;
-      newAccountError.value = '';
-      try{
-        const r = await api('/admin/api/accounts/add', {
-          method: 'POST',
-          body: JSON.stringify({
-            name: newAccount.name.trim() || '新账号',
-            cookies: newAccount.cookies.trim()
-          })
-        });
-        if(r.status === 'ok'){
-          showAddAccountModal.value = false;
-          newAccount.name = '';
-          newAccount.cookies = '';
-          alert('账号添加成功！');
-          await fetchAccounts();
-        }else{
-          newAccountError.value = r.detail || '添加失败';
-        }
-      }catch(e){
-        newAccountError.value = e.message;
-      }finally{
-        newAccountLoading.value = false;
-      }
+    async function clearAccountCooldown(id) {
+      try {
+        await api('/admin/api/accounts/clear_cooldown', { method: 'POST', body: JSON.stringify({ account_id: id }) });
+        await fetchAccounts();
+      } catch (e) { alert(e.message); }
     }
 
-    async function deleteAccount(id){
-      if(!confirm('确定要删除此账号吗？')) return;
+    async function deleteAccount(acc) {
+      if (!confirm(`确定删除账号「${acc.name}」及其独立隔离资料目录吗？`)) return;
       accountActionLoading.value = true;
-      try{
+      try {
         await api('/admin/api/accounts/delete', {
           method: 'POST',
-          body: JSON.stringify({ account_id: id })
+          body: JSON.stringify({ account_id: acc.id, delete_profile: true }),
         });
-        await fetchAccounts();
-      }catch(e){
-        alert('删除失败: ' + e.message);
-      }finally{
+        await Promise.all([fetchAccounts(), fetchStatus()]);
+      } catch (e) {
+        alert(e.message);
+      } finally {
         accountActionLoading.value = false;
       }
     }
 
-    async function resetQuota(id){
-      accountActionLoading.value = true;
-      try{
-        await api('/admin/api/accounts/reset_quota', {
-          method: 'POST',
-          body: JSON.stringify({ account_id: id })
-        });
-        await fetchAccounts();
-      }catch(e){
-        alert('重置失败: ' + e.message);
-      }finally{
-        accountActionLoading.value = false;
-      }
-    }
-
-    async function setStrategy(val){
-      try{
-        const r = await api('/admin/api/accounts/strategy', {
-          method: 'POST',
-          body: JSON.stringify({ strategy: val })
-        });
-        if(r.status === 'ok'){
-          accountStrategy.value = r.strategy;
-        }
-      }catch(e){
-        alert('设置策略失败: ' + e.message);
-      }
-    }
-
-    // Rename account
-    const showRenameModal = ref(false);
-    const renameData = reactive({ id: '', name: '' });
-    function openRenameModal(acc){
-      renameData.id = acc.id;
-      renameData.name = acc.name;
-      showRenameModal.value = true;
-    }
-    async function confirmRename(){
-      if(!renameData.name.trim()) return;
-      accountActionLoading.value = true;
-      try{
-        const r = await api('/admin/api/accounts/rename', {
-          method: 'POST',
-          body: JSON.stringify({ account_id: renameData.id, name: renameData.name.trim() })
-        });
-        if(r.status === 'ok'){
-          showRenameModal.value = false;
-          await fetchAccounts();
-        }else{
-          alert('重命名失败: ' + (r.detail || ''));
-        }
-      }catch(e){
-        alert('重命名失败: ' + e.message);
-      }finally{
-        accountActionLoading.value = false;
-      }
-    }
-
-    async function clearCaptcha(id){
-      accountActionLoading.value = true;
-      try{
-        const r = await api('/admin/api/accounts/clear_captcha', {
-          method: 'POST',
-          body: JSON.stringify({ account_id: id })
-        });
-        if(r.status === 'ok'){
-          alert('已成功解除该账号的人机验证标记！');
-          await fetchAccounts();
-        }else{
-          alert('操作失败: ' + (r.detail || r.message || ''));
-        }
-      }catch(e){
-        alert('操作失败: ' + e.message);
-      }finally{
-        accountActionLoading.value = false;
-      }
-    }
-
-    // Probe all accounts
-    const probingAccounts = ref(false);
-    async function probeAllAccounts(){
+    async function probeAllAccounts() {
       probingAccounts.value = true;
-      try{
+      try {
         const r = await api('/admin/api/accounts/probe_all', { method: 'POST' });
-        if(r.status === 'ok'){
-          const results = r.results || [];
-          const validCount = results.filter(x => x.valid).length;
-          const invalidCount = results.length - validCount;
-          alert(`巡检完成！共 ${results.length} 个账号：${validCount} 个正常，${invalidCount} 个已失效。`);
-          await fetchAccounts();
-        }
-      }catch(e){
-        alert('巡检失败: ' + e.message);
-      }finally{
+        const list = r.results || [];
+        const okCount = list.filter(x => x.valid).length;
+        alert(`巡检完成：共 ${list.length} 个账号，有效 ${okCount} 个，异常 ${list.length - okCount} 个`);
+        await fetchAccounts();
+      } catch (e) {
+        alert('巡检失败：' + e.message);
+      } finally {
         probingAccounts.value = false;
       }
     }
 
-    // Recent media gallery
-    const recentMedia = ref([]);
-    async function fetchRecentMedia(){
-      try{
-        const r = await api('/admin/api/media/recent');
-        recentMedia.value = r.media || [];
-      }catch(e){}
+    // ── Isolated Browser Login / Manage Profile Modal ──
+    function resetBrowserModal() {
+      if (browserModal.ws) { try { browserModal.ws.close(); } catch {} browserModal.ws = null; }
+      browserModal.sessionId = '';
+      browserModal.status = '';
+      browserModal.message = '';
+      browserModal.error = '';
+      browserModal.frameB64 = '';
+      browserModal.frameMeta = null;
+      browserModal.pageUrl = '';
+      browserModal.loggedInDetected = false;
+      browserModal.textInput = '';
+      browserModal.starting = false;
     }
 
-    // Testing playground
-    const test = reactive({
-      model: 'doubao-2.1-turbo',
-      reasoningEffort: 'auto',
-      stream: true,
-      prompt: '9.11和9.8哪个大？请简要推理说明。',
-      output: '',
-      thinking: '',
-      thinkOpen: true,
-      error: '',
-      loading: false,
-      ms: 0
-    });
-
-    function fmtTime(ts){
-      if(!ts) return '';
-      return new Date(ts*1000).toLocaleTimeString('zh-CN', {hour12: false});
+    function openBrowserAddModal() {
+      resetBrowserModal();
+      browserModal.mode = 'add';
+      browserModal.accountId = null;
+      browserModal.name = '';
+      browserModal.proxyUrl = '';
+      browserModal.proxyMasked = '';
+      browserModal.headless = true;
+      browserModal.open = true;
     }
 
-    function fmtDur(s){
-      if(!s && s !== 0) return '0s';
-      s = Math.round(s);
-      if(s < 60) return s + '秒';
-      if(s < 3600) return Math.floor(s/60) + '分 ' + (s%60) + '秒';
-      return Math.floor(s/3600) + '小时 ' + Math.floor((s%3600)/60) + '分';
+    async function openManageAccountBrowser(acc) {
+      resetBrowserModal();
+      browserModal.mode = 'manage';
+      browserModal.accountId = acc.id;
+      browserModal.name = acc.name;
+      browserModal.proxyUrl = '';
+      browserModal.proxyMasked = acc.proxy_masked || '';
+      browserModal.headless = true;
+      browserModal.open = true;
+      await startBrowserLoginSession();
     }
 
-    function copyText(txt, okMsg='已复制到剪贴板!'){
-      navigator.clipboard.writeText(txt).then(()=>{
-        alert(okMsg);
-      }).catch(()=>{
-        prompt('请按 Ctrl+C 复制内容:', txt);
-      });
-    }
-
-    async function api(path, opts={}){
-      const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
-      if(apiKey.value){
-        headers['Authorization'] = 'Bearer ' + apiKey.value;
-      }
-      const r = await fetch(API + path, { ...opts, headers });
-      if(r.status === 401){
-        showKeyModal.value = true;
-        throw new Error('未授权 (401)，请输入有效的 API Key');
-      }
-      return r.json();
-    }
-
-    async function fetchSession(){
-      try{
-        const d = await api('/admin/api/status');
-        session.value = {
-          logged_in: d.logged_in,
-          status: d.logged_in ? 'healthy' : 'not_logged_in',
-          needs_captcha: d.needs_captcha
-        };
-        if(d.headless !== undefined){
-          browserMode.headless = d.headless;
-          browserMode.mode = d.mode || (d.headless ? 'headless' : 'window');
-          if(d.browser_name) browserMode.browserName = d.browser_name;
-        }
-      }catch(e){
-        if(!session.value) session.value = { logged_in: false };
-      }
-    }
-
-    async function fetchSystem(){
-      try{
-        serverInfo.value = await api('/admin/api/system');
-      }catch(e){}
-    }
-
-    async function fetchOverview(){
-      await Promise.all([fetchSession(), fetchSystem(), fetchAccounts()]);
-    }
-
-    async function openDoubaoWeb(){
-      window.open('https://www.doubao.com/chat/', '_blank');
-      try{
-        await api('/admin/api/open-doubao', { method: 'POST' });
-      }catch(e){}
-    }
-
-    async function toggleBrowserMode(){
-      await forceWindow();
-    }
-
-    async function forceWindow(){
-      windowActionLoading.value = true;
-      try{
-        const r = await api('/admin/api/browser/force-window', { method: 'POST' });
-        if(r.status === 'ok'){
-          browserMode.headless = false;
-          browserMode.mode = 'window';
-          if(r.browser_name) browserMode.browserName = r.browser_name;
-          alert('已打开独立桌面浏览器窗口。若任务栏闪烁，请点击激活。');
-        }else{
-          alert('唤起窗口提示: ' + (r.detail || '后台正在运行'));
-        }
-        await fetchSession();
-      }catch(e){
-        alert('操作失败: ' + e.message);
-      }finally{
-        windowActionLoading.value = false;
-      }
-    }
-
-    // QR Login Flow
-    async function toggleQrModal(){
-      showQrModal.value = !showQrModal.value;
-      if(showQrModal.value){
-        await startQrLogin();
-      }else if(qrState.pollTimer){
-        clearInterval(qrState.pollTimer);
-        qrState.pollTimer = null;
-      }
-    }
-
-    async function startQrLogin(){
-      if(qrState.pollTimer){
-        clearInterval(qrState.pollTimer);
-        qrState.pollTimer = null;
-      }
-      qrState.loading = true;
-      qrState.img = '';
-      qrState.error = '';
-      qrState.status = 'starting';
-      qrState.statusText = '正在生成二维码...';
-
-      try{
-        const r = await api('/v1/session/qr-login', { method: 'POST' });
-        if(r.qr_image_base64){
-          qrState.img = r.qr_image_base64;
-          qrState.status = 'waiting_scan';
-          qrState.statusText = '二维码已就绪，请使用豆包 App 扫码';
-          pollQrLogin();
-        }else{
-          qrState.error = r.detail || r.error || '生成二维码失败';
-          qrState.status = 'failed';
-          qrState.statusText = '生成失败: ' + qrState.error;
-        }
-      }catch(e){
-        qrState.error = e.message;
-        qrState.status = 'failed';
-        qrState.statusText = '请求失败: ' + e.message;
-      }finally{
-        qrState.loading = false;
-      }
-    }
-
-    function pollQrLogin(){
-      if(qrState.pollTimer) clearInterval(qrState.pollTimer);
-      qrState.pollTimer = setInterval(async () => {
-        try{
-          const r = await api('/v1/session/qr-login');
-          qrState.status = r.status || qrState.status;
-          if(r.status === 'confirmed' || r.status === 'success'){
-            clearInterval(qrState.pollTimer);
-            qrState.pollTimer = null;
-            qrState.status = 'success';
-            qrState.statusText = '🎉 登录成功！正在同步更新会话...';
-            setTimeout(async () => {
-              await fetchSession();
-              setTimeout(() => { showQrModal.value = false; }, 2000);
-            }, 1000);
-          }else if(r.status === 'scanned'){
-            qrState.statusText = '已扫码，请在手机上点击确认登录...';
-          }else if(r.status === 'expired'){
-            qrState.statusText = '二维码已过期，请点击右上角重新获取';
-            clearInterval(qrState.pollTimer);
-            qrState.pollTimer = null;
-          }else if(r.status === 'failed'){
-            qrState.statusText = '登录失败: ' + (r.error || '未知原因');
-            clearInterval(qrState.pollTimer);
-            qrState.pollTimer = null;
-          }
-        }catch(e){
-          clearInterval(qrState.pollTimer);
-          qrState.pollTimer = null;
-        }
-      }, 2000);
-    }
-
-    async function toggleScreenshot(){
-      showScreenshot.value = !showScreenshot.value;
-      if(showScreenshot.value){
-        await refreshScreenshot();
-      }
-    }
-
-    async function refreshScreenshot(){
-      screenshot.loading = true;
-      try{
-        const headers = {};
-        if(apiKey.value) headers['Authorization'] = 'Bearer ' + apiKey.value;
-        const r = await fetch(API + '/auth/screenshot', { headers });
-        if(!r.ok) throw new Error('HTTP ' + r.status);
-        const blob = await r.blob();
-        screenshot.img = URL.createObjectURL(blob);
-        screenshot.time = new Date().toLocaleTimeString('zh-CN', { hour12: false });
-      }catch(e){
-        screenshot.img = '';
-        alert('获取画面失败: ' + e.message);
-      }finally{
-        screenshot.loading = false;
-      }
-    }
-
-    async function submitCookie(){
-      if(!cookieInput.value.trim()) return;
-      cookieLoading.value = true;
-      cookieMessage.value = '';
-      try{
-        const r = await api('/admin/api/cookies/import', {
+    async function startBrowserLoginSession() {
+      browserModal.starting = true;
+      browserModal.error = '';
+      try {
+        const res = await api('/admin/api/login-sessions/start', {
           method: 'POST',
-          body: JSON.stringify({ cookies: cookieInput.value.trim() })
+          body: JSON.stringify({
+            mode: browserModal.mode,
+            account_id: browserModal.accountId,
+            name: browserModal.name.trim() || undefined,
+            proxy_url: browserModal.proxyUrl.trim() || undefined,
+            headless: browserModal.headless,
+          }),
         });
-        if((r.status === 'ok' || r.success) && (r.logged_in || r.ready)){
-          cookieMessage.value = '🎉 导入成功！会话已成功激活并就绪！';
-          cookieInput.value = '';
-          await fetchSession();
-        }else{
-          cookieMessage.value = '⚠️ 导入已接收，但检测到会话未生效，请确认复制了包含 sessionid 的完整 Cookie。';
-          await fetchSession();
-        }
-      }catch(e){
-        cookieMessage.value = '导入出错: ' + e.message;
-      }finally{
-        cookieLoading.value = false;
+        browserModal.sessionId = res.session_id;
+        browserModal.status = res.status;
+        browserModal.message = res.message;
+        browserModal.proxyMasked = res.proxy_masked || browserModal.proxyMasked;
+        connectSessionWs(res.session_id);
+      } catch (e) {
+        browserModal.error = e.message;
+      } finally {
+        browserModal.starting = false;
       }
     }
 
-    const installingChromium = ref(false);
-    async function installChromium(){
-      if(!confirm('是否在后台自动下载并安装通用的 Playwright Chromium 独立浏览器？（约需 1~2 分钟）')) return;
-      installingChromium.value = true;
-      try{
-        const r = await api('/admin/api/browser/install-chromium', { method: 'POST' });
-        alert(r.message || '安装完成！');
-        await fetchSession();
-      }catch(e){
-        alert('安装失败: ' + e.message);
-      }finally{
-        installingChromium.value = false;
+    function connectSessionWs(sessionId) {
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const qs = apiKey.value ? `?token=${encodeURIComponent(apiKey.value)}` : '';
+      const ws = new WebSocket(`${proto}//${location.host}/admin/api/login-sessions/${sessionId}/ws${qs}`);
+      browserModal.ws = ws;
+      ws.onmessage = async (ev) => {
+        try {
+          const msg = JSON.parse(ev.data);
+          if (msg.frame_b64) browserModal.frameB64 = msg.frame_b64;
+          if (msg.frame_meta) {
+            browserModal.frameMeta = msg.frame_meta;
+            if (msg.frame_meta.url) browserModal.pageUrl = msg.frame_meta.url;
+          }
+          if (msg.session_status) browserModal.status = msg.session_status;
+          if (msg.session_message) browserModal.message = msg.session_message;
+          if (typeof msg.logged_in_detected === 'boolean') browserModal.loggedInDetected = msg.logged_in_detected;
+          if (msg.session_status === 'completed') {
+            await Promise.all([fetchAccounts(), fetchStatus()]);
+            setTimeout(() => {
+              browserModal.open = false;
+              resetBrowserModal();
+            }, 900);
+          } else if (msg.session_status === 'error') {
+            browserModal.error = msg.error || msg.session_message;
+          }
+        } catch {}
+      };
+    }
+
+    function sendSessionInput(payload) {
+      if (browserModal.ws && browserModal.ws.readyState === WebSocket.OPEN) {
+        browserModal.ws.send(JSON.stringify(payload));
+      } else if (browserModal.sessionId) {
+        api(`/admin/api/login-sessions/${browserModal.sessionId}/input`, {
+          method: 'POST', body: JSON.stringify(payload),
+        }).catch(() => {});
       }
     }
 
-    async function toggleAutoDelete(){
-      try{
-        const r = await api('/admin/api/config/auto-delete', { method: 'POST' });
-        serverInfo.value.auto_delete_conv = r.auto_delete_conv;
-      }catch(e){
-        alert('切换失败: ' + e.message);
+    function mapCoords(ev) {
+      const img = liveViewImg.value;
+      if (!img) return null;
+      const rect = img.getBoundingClientRect();
+      const fw = browserModal.frameMeta?.width || img.naturalWidth || rect.width;
+      const fh = browserModal.frameMeta?.height || img.naturalHeight || rect.height;
+      return {
+        x: Math.round(((ev.clientX - rect.left) / Math.max(1, rect.width)) * fw),
+        y: Math.round(((ev.clientY - rect.top) / Math.max(1, rect.height)) * fh),
+      };
+    }
+
+    function onLiveMouse(ev, action) {
+      const c = mapCoords(ev);
+      if (!c) return;
+      if (action === 'down') { browserModal.mouseDown = true; liveViewImg.value?.focus(); }
+      if (action === 'up') browserModal.mouseDown = false;
+      sendSessionInput({ type: 'pointer', action, x: c.x, y: c.y, button: ev.button || 0 });
+    }
+
+    function onLiveMouseMove(ev) {
+      if (!browserModal.mouseDown) return;
+      const now = Date.now();
+      if (now - browserModal.lastMoveTs < 60) return;
+      browserModal.lastMoveTs = now;
+      const c = mapCoords(ev);
+      if (c) sendSessionInput({ type: 'pointer', action: 'move', x: c.x, y: c.y });
+    }
+
+    function onLiveWheel(ev) {
+      const c = mapCoords(ev);
+      if (!c) return;
+      sendSessionInput({ type: 'wheel', x: c.x, y: c.y, deltaX: Math.round(ev.deltaX), deltaY: Math.round(ev.deltaY) });
+    }
+
+    function onLiveKey(ev, action) {
+      sendSessionInput({ type: 'key', action, key: ev.key });
+    }
+
+    function sendSessionText() {
+      if (!browserModal.textInput) return;
+      sendSessionInput({ type: 'text', text: browserModal.textInput });
+      browserModal.textInput = '';
+    }
+
+    async function saveBrowserSession() {
+      if (!browserModal.sessionId) return;
+      try {
+        await api(`/admin/api/login-sessions/${browserModal.sessionId}/save`, { method: 'POST' });
+      } catch (e) { alert(e.message); }
+    }
+
+    async function cancelBrowserSession() {
+      if (browserModal.sessionId) {
+        await api(`/admin/api/login-sessions/${browserModal.sessionId}/cancel`, { method: 'POST' }).catch(() => {});
+      }
+      browserModal.open = false;
+      resetBrowserModal();
+      await Promise.all([fetchAccounts(), fetchStatus()]);
+    }
+
+    function closeBrowserModal() {
+      if (browserModal.sessionId && ['starting', 'waiting'].includes(browserModal.status)) {
+        cancelBrowserSession();
+      } else {
+        browserModal.open = false;
+        resetBrowserModal();
       }
     }
 
-    async function fetchLogs(){
-      try{
-        const l = await api('/admin/api/logs');
-        logs.value = Array.isArray(l) ? [...l].reverse() : [];
-      }catch(e){}
+    // ── Import & Edit Account ──
+    async function submitImportAccount() {
+      if (!importForm.cookies.trim()) { importForm.error = '请填写 Cookie'; return; }
+      importForm.loading = true;
+      importForm.error = '';
+      try {
+        await api('/admin/api/accounts/add', {
+          method: 'POST',
+          body: JSON.stringify({
+            name: importForm.name.trim() || 'Dola Account',
+            cookies: importForm.cookies.trim(),
+            proxy_url: importForm.proxy_url.trim() || undefined,
+          }),
+        });
+        showImportModal.value = false;
+        importForm.name = ''; importForm.proxy_url = ''; importForm.cookies = '';
+        await Promise.all([fetchAccounts(), fetchStatus()]);
+      } catch (e) {
+        importForm.error = e.message;
+      } finally {
+        importForm.loading = false;
+      }
     }
 
-    async function runTest(){
-      test.output = '';
-      test.thinking = '';
-      test.error = '';
-      test.loading = true;
-      test.ms = 0;
+    function openEditAccountModal(acc) {
+      editModal.id = acc.id;
+      editModal.name = acc.name;
+      editModal.proxy_url = '';
+      editModal.error = '';
+      editModal.open = true;
+    }
+
+    async function saveEditAccount() {
+      editModal.loading = true;
+      editModal.error = '';
+      try {
+        await api(`/admin/api/accounts/${editModal.id}`, {
+          method: 'PUT',
+          body: JSON.stringify({
+            name: editModal.name.trim(),
+            proxy_url: editModal.proxy_url.trim(),
+          }),
+        });
+        editModal.open = false;
+        await fetchAccounts();
+      } catch (e) {
+        editModal.error = e.message;
+      } finally {
+        editModal.loading = false;
+      }
+    }
+
+    // ── API Playground ──
+    async function runChatTest() {
+      if (!testChat.prompt.trim()) return;
+      testChat.loading = true; testChat.output = ''; testChat.thinking = ''; testChat.error = ''; testChat.ms = 0;
       const t0 = Date.now();
-
-      if(!test.prompt.trim()){
-        test.error = '请输入测试内容';
-        test.loading = false;
-        return;
-      }
-
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 90000);
-
-      try{
-        const reqBody = {
-          model: test.model,
-          messages: [{ role: 'user', content: test.prompt }],
-          stream: test.stream
-        };
-        if(test.reasoningEffort !== 'auto'){
-          reqBody.reasoning_effort = test.reasoningEffort;
-          reqBody.enable_thinking = (test.reasoningEffort !== 'none');
-        }
-
+      try {
         const headers = { 'Content-Type': 'application/json' };
-        if(apiKey.value) headers['Authorization'] = 'Bearer ' + apiKey.value;
-
-        const resp = await fetch(API + '/v1/chat/completions', {
+        if (apiKey.value) headers['Authorization'] = `Bearer ${apiKey.value}`;
+        const resp = await fetch('/v1/chat/completions', {
           method: 'POST',
           headers,
-          body: JSON.stringify(reqBody),
-          signal: controller.signal
+          body: JSON.stringify({
+            model: testChat.model,
+            messages: [{ role: 'user', content: testChat.prompt }],
+            stream: testChat.stream,
+          }),
         });
-
-        if(!resp.ok){
+        if (!resp.ok) {
           const err = await resp.json().catch(() => ({}));
-          throw new Error(err.error?.message || err.detail || ('HTTP ' + resp.status));
+          throw new Error(err?.error?.message || `HTTP ${resp.status}`);
         }
-
-        if(test.stream){
+        if (testChat.stream) {
           const reader = resp.body.getReader();
           const dec = new TextDecoder();
           let buf = '';
-          while(true){
+          while (true) {
             const { done, value } = await reader.read();
-            if(done) break;
+            if (done) break;
             buf += dec.decode(value, { stream: true });
             const lines = buf.split('\n');
-            buf = lines.pop() || '';
-            for(const line of lines){
-              if(!line.startsWith('data: ')) continue;
-              const d = line.slice(6);
-              if(d === '[DONE]') continue;
-              let j;
-              try{
-                j = JSON.parse(d);
-              }catch(e){
-                continue;
-              }
-              if(j.error){
-                const message = typeof j.error.message === 'string' ? j.error.message : 'Stream error';
-                throw new Error(message);
-              }
-              const delta = j.choices?.[0]?.delta || {};
-              if(delta.reasoning_content) test.thinking += delta.reasoning_content;
-              if(delta.content) test.output += delta.content;
+            buf = lines.pop();
+            for (const line of lines) {
+              const s = line.trim();
+              if (!s.startsWith('data: ') || s === 'data: [DONE]') continue;
+              try {
+                const obj = JSON.parse(s.slice(6));
+                const d = obj.choices?.[0]?.delta || {};
+                if (d.reasoning_content) testChat.thinking += d.reasoning_content;
+                if (d.content) testChat.output += d.content;
+              } catch {}
             }
           }
-        }else{
-          const r = await resp.json();
-          const msg = r.choices?.[0]?.message || {};
-          test.output = msg.content || JSON.stringify(r, null, 2);
-          if(msg.reasoning_content) test.thinking = msg.reasoning_content;
+        } else {
+          const d = await resp.json();
+          testChat.thinking = d.choices?.[0]?.message?.reasoning_content || '';
+          testChat.output = d.choices?.[0]?.message?.content || '';
         }
-        test.ms = Date.now() - t0;
-      }catch(e){
-        if(e.name === 'AbortError'){
-          test.error = '请求超时（超过90秒），可能尚未完成登录，请先通过扫码或导入Cookie登录。';
-        }else{
-          test.error = e.message || '调用出错';
-        }
-      }finally{
-        clearTimeout(timeoutId);
-        test.loading = false;
-        fetchLogs();
+        testChat.ms = Date.now() - t0;
+      } catch (e) {
+        testChat.error = e.message;
+      } finally {
+        testChat.loading = false;
       }
     }
 
-    async function resetCaptcha(){
-      try{
-        const r = await api('/auth/reset_captcha', { method: 'POST' });
-        alert(r.message || '安全拦截标志已解除，服务已恢复正常！');
-        await fetchSession();
-      }catch(e){
-        alert('解除失败: ' + e.message);
+    async function runImageTest() {
+      if (!testMedia.imgPrompt.trim()) return;
+      testMedia.imgLoading = true; testMedia.imgError = '';
+      try {
+        await api('/v1/images/generations', {
+          method: 'POST',
+          body: JSON.stringify({
+            model: testMedia.imgModel,
+            prompt: testMedia.imgPrompt.trim(),
+            ratio: testMedia.imgRatio === 'auto' ? undefined : testMedia.imgRatio,
+          }),
+        });
+        await fetchRecentMedia();
+      } catch (e) {
+        testMedia.imgError = e.message;
+      } finally {
+        testMedia.imgLoading = false;
       }
     }
 
-    watch(activeTab, (val) => {
-      if(val === 0) fetchOverview();
-      if(val === 1) fetchRecentMedia();
-      if(val === 2) fetchAccounts();
-      if(val === 3) fetchSystem();
-      if(val === 4) fetchLogs();
-    });
+    async function runVideoTest() {
+      if (!testMedia.vidPrompt.trim()) return;
+      testMedia.vidLoading = true; testMedia.vidError = '';
+      try {
+        await api('/v1/video/generations', {
+          method: 'POST',
+          body: JSON.stringify({
+            model: testMedia.vidModel,
+            prompt: testMedia.vidPrompt.trim(),
+            duration: testMedia.vidDuration,
+          }),
+        });
+        await fetchRecentMedia();
+      } catch (e) {
+        testMedia.vidError = e.message;
+      } finally {
+        testMedia.vidLoading = false;
+      }
+    }
 
-    onMounted(()=>{
-      fetchOverview();
-      fetchLogs();
-      fetchRecentMedia();
-      currentTime.value = new Date().toLocaleTimeString('zh-CN', { hour12: false });
-      setInterval(() => {
+    async function fetchRecentMedia() {
+      try {
+        const d = await api('/admin/api/media/recent');
+        recentMedia.value = d.media || [];
+      } catch {}
+    }
+
+    async function fetchLogs() {
+      try {
+        const d = await api('/admin/api/logs');
+        logs.value = (Array.isArray(d) ? d : (d.logs || [])).slice().reverse();
+      } catch {}
+    }
+
+    function formatTs(ts) {
+      if (!ts) return '';
+      return new Date(ts * 1000).toLocaleTimeString('zh-CN', { hour12: false });
+    }
+
+    function switchTab(i) {
+      activeTab.value = i;
+      if (i === 0) refreshAll();
+      if (i === 1) fetchRecentMedia();
+      if (i === 2) { fetchSystem(); fetchProxyConfig(); }
+      if (i === 3) fetchLogs();
+    }
+
+    async function refreshAll() {
+      await Promise.all([fetchStatus(), fetchAccounts(), fetchSystem(), fetchProxyConfig()]);
+    }
+
+    let timer = null;
+    onMounted(() => {
+      refreshAll();
+      timer = setInterval(() => {
         currentTime.value = new Date().toLocaleTimeString('zh-CN', { hour12: false });
-      }, 1000);
-      setInterval(() => {
-        if(activeTab.value === 0) fetchSession();
-        if(activeTab.value === 1) fetchRecentMedia();
-        if(activeTab.value === 2) fetchAccounts();
-        if(activeTab.value === 4) fetchLogs();
-      }, 5000);
+        if (activeTab.value === 0 && !browserModal.open) {
+          fetchStatus();
+          fetchAccounts();
+        }
+      }, 4000);
+    });
+    onUnmounted(() => {
+      if (timer) clearInterval(timer);
+      if (browserModal.ws) try { browserModal.ws.close(); } catch {}
     });
 
     return {
-      API, apiBaseUrl, apiKey, keyInput, showKeyModal, saveApiKey,
-      tabs, icons, activeTab, session, browserMode, modeSwitching,
-      currentTime, serverInfo, copyText, fmtDur, fmtTime,
-      cookieInput, cookieLoading, cookieMessage,
-      showAdvanced, showScreenshot, screenshot, windowActionLoading,
-      showQrModal, qrState, qrStatusColor, toggleQrModal, startQrLogin,
-      logs, test,
-      fetchOverview, fetchSystem, openDoubaoWeb, toggleBrowserMode, forceWindow,
-      toggleScreenshot, refreshScreenshot, submitCookie, fetchLogs, runTest, resetCaptcha,
-      installChromium, installingChromium, toggleAutoDelete,
-      // Multi-account pool
-      accounts, accountStrategy, activeAccountId, accountActionLoading,
-      showAddAccountModal, newAccount, newAccountLoading, newAccountError,
-      fetchAccounts, switchAccount, saveCurrentAsAccount, addAccount,
-      deleteAccount, resetQuota, setStrategy,
-      // P0 / P1 / P2 additions
-      showRenameModal, renameData, openRenameModal, confirmRename,
-      probingAccounts, probeAllAccounts, recentMedia, fetchRecentMedia,
-      clearCaptcha
+      activeTab, tabs, switchTab,
+      apiKey, apiKeyInput, showKeyModal, saveApiKey, apiBaseUrl, currentTime,
+      session, serverInfo, autoDeleteConv, toggleAutoDelete,
+      accounts, accountStrategy, activeAccountId, activeAccountObj, activeAvailableCount,
+      accountActionLoading, probingAccounts,
+      setStrategy, switchAccount, clearAccountCaptcha, clearAccountCooldown, deleteAccount, probeAllAccounts,
+      proxyState, saveGlobalProxy,
+      logs, fetchLogs, formatTs,
+      recentMedia, fetchRecentMedia,
+      liveViewImg, browserModal, openBrowserAddModal, openManageAccountBrowser,
+      startBrowserLoginSession, sendSessionInput, onLiveMouse, onLiveMouseMove, onLiveWheel, onLiveKey,
+      sendSessionText, saveBrowserSession, cancelBrowserSession, closeBrowserModal,
+      showImportModal, importForm, submitImportAccount,
+      editModal, openEditAccountModal, saveEditAccount,
+      testChat, runChatTest, testMedia, runImageTest, runVideoTest,
+      refreshAll,
     };
   }
 }).mount('#app');

@@ -217,8 +217,8 @@ class UploadedFile:
     file_type: str = ""
 
 
-DEFAULT_BOT_ID = "7234781073513644036"
-EXTENSION_BOT_ID = "7338286299411103781"
+DEFAULT_BOT_ID = "7339470689562525703"
+EXTENSION_BOT_ID = "7339470689562525703"
 
 # Supported file extensions for upload (from frontend source)
 UPLOAD_SUPPORTED_EXTENSIONS = {
@@ -239,7 +239,7 @@ def _aws_sign_v4(
     access_key: str,
     secret_key: str,
     session_token: str,
-    region: str = "cn-north-1",
+    region: str = "ap-singapore-1",
     service: str = "imagex",
 ) -> Dict[str, str]:
     """Generate AWS Signature V4 headers for ByteDance ImageX proxy."""
@@ -320,7 +320,7 @@ class DoubaoChatClient:
                 print(chunk.text, end="", flush=True)
     """
 
-    BASE_URL = "https://www.doubao.com"
+    BASE_URL = "https://www.dola.com"
 
     def __init__(
         self,
@@ -384,8 +384,8 @@ class DoubaoChatClient:
                     f"Chrome/{CHROME_VERSION} Safari/537.36"
                 ),
                 "Content-Type": "application/json",
-                "Origin": "https://www.doubao.com",
-                "Referer": "https://www.doubao.com/chat",
+                "Origin": "https://www.dola.com",
+                "Referer": "https://www.dola.com/chat/",
             },
         )
         return self
@@ -429,18 +429,18 @@ class DoubaoChatClient:
 
     def _security_params(self) -> Dict[str, str]:
         params = {
-            "aid": "582478",
-            "real_aid": "582478",
+            "aid": "495671",
+            "real_aid": "495671",
             "device_id": self.device_id,
             "tea_uuid": self.device_id,
             "web_id": self.web_id,
             "device_platform": "web",
-            "language": "zh",
-            "region": "CN",
-            "sys_region": "CN",
+            "language": "en",
+            "region": "SG",
+            "sys_region": "SG",
             "pkg_type": "release_version",
             "version_code": "20800",
-            "pc_version": "2.1.7",
+            "pc_version": "3.46.4",
             "chromium_version": CHROMIUM_BUILD,
             "client_platform": "pc_client",
             "runtime": "web",
@@ -479,10 +479,10 @@ class DoubaoChatClient:
                 "content": json.dumps({"text": text}, ensure_ascii=False),
                 "reply_id": "",
                 "ext": {
-                    "origin": "https://www.doubao.com",
+                    "origin": "https://www.dola.com",
                     "stream": "1",
                     "answer_with_suggest": "1",
-                    "browser_language": "zh-CN",
+                    "browser_language": "en-US",
                 },
                 "local_conversation_id": "0",
                 "bot_id": bot_id or self.bot_id,
@@ -2238,8 +2238,8 @@ class DoubaoChatClient:
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/135.0.0.0 Safari/537.36"
             ),
-            "Origin": "https://www.doubao.com",
-            "Referer": "https://www.doubao.com/chat",
+            "Origin": "https://www.dola.com",
+            "Referer": "https://www.dola.com/chat/",
             "x-tt-passport-csrf-token": (
                 self.cookies.get("passport_csrf_token")
                 or self.cookies.get("passport_csrf_token_default")

@@ -73,16 +73,13 @@ def test_account_manager_captcha_lifecycle(tmp_path):
 
 def test_auto_solve_captcha_integration():
     """Test SliderCaptchaSolver detect_and_solve returns False when no container is present."""
-    mock_page = MagicMock()
-    mock_page.frames = []
-    loc = MagicMock()
-    loc.count = AsyncMock(return_value=0)
-    mock_page.locator = MagicMock(return_value=loc)
+    mock_bidi = MagicMock()
+    mock_bidi.command = AsyncMock(return_value={"contexts": [{"context": "ctx-1"}]})
+    mock_bidi.evaluate = AsyncMock(return_value=None)
 
     solver = SliderCaptchaSolver()
-    result = asyncio.run(solver.detect_and_solve(mock_page))
+    result = asyncio.run(solver.detect_and_solve(mock_bidi, "ctx-1"))
     assert result is False
-
 
 def test_admin_clear_captcha_endpoint(tmp_path):
     """Test POST /admin/api/accounts/clear_captcha endpoint."""
@@ -206,7 +203,7 @@ def test_failed_account_switch_does_not_report_recovery(tmp_path):
     )
 
     assert response.status_code == 503
-    assert "打开独立桌面浏览器窗口" in response.text
+    assert "Web LiveView" in response.text
     assert "http://testserver/admin" in response.text
     error = response.json()["error"]
     assert isinstance(error["message"], str)

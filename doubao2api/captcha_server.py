@@ -98,18 +98,18 @@ function renderCaptcha(params) {
   try {
     var inst = new window.bdCaptcha.CaptchaVerify({
       info: {
-        aid: params.aid || '582478',
-        appName: params.appName || 'doubao',
-        lang: params.lang || 'zh',
+        aid: params.aid || '495671',
+        appName: params.appName || 'dola',
+        lang: params.lang || 'en',
         did: params.did || '',
         fp: params.fp || '',
         pageId: '27032'
       },
       ele: 'captcha_container',
-      host: params.host || 'https://verify.zijieapi.com',
+      host: params.host || 'https://verify-sg.byteoversea.com',
       env: {
         h5_check_version: '4.0.16',
-        product_host: 'https://www.doubao.com',
+        product_host: 'https://www.dola.com',
         vc_version: '1.0.0.739'
       },
       successCb: function(result) {

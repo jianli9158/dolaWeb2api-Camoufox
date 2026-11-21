@@ -1,40 +1,93 @@
-"""Playwright-based Doubao client with in-browser fetch.
+"""Native Camoufox + WebDriver BiDi client for Dola International (https://www.dola.com/).
 
-Architecture:
-- Playwright: Login (QR scan via noVNC) + page session
-- In-browser fetch(): API requests go through ByteDance's fetch hook which
-  automatically injects a_bogus/msToken signatures with real browser fingerprint
-- httpx: Only used for file upload (TOS/ImageX flow, no fetch hook needed)
-- expose_function bridge: Streams SSE chunks from browser JS back to Python
-
-ByteDance's frontend exposes window.bdms.frontierSign() which generates
-X-Bogus signatures. We use Playwright only to maintain a logged-in page
-and call this signing function. All actual API traffic goes through httpx.
+Architecture adapted from flow2api-Camoufox:
+- Zero Playwright / Chromium dependency: native Camoufox binary + pure asyncio WebDriver BiDi.
+- Persistent per-profile Windows Firefox fingerprint (`camoufox-fingerprint.json` + `CAMOU_CONFIG_*`).
+- OS kernel profile lock (`fcntl.flock` / `msvcrt.locking`) + startup cache save/restore.
+- Local unauthenticated SOCKS5 relay (`LocalSocks5Relay`) for authenticated upstream HTTP/SOCKS5 proxies.
+- Native `BiDiChannel` (`script.message`) SSE streaming from in-browser `fetch()` (with `bdms` signing).
+- Built-in `CamoufoxLiveView` attachment for remote Web interactive login (Google / Lark / QR) and captcha solving.
 """
 
+from __future__ import annotations
+
 import asyncio
+import base64
+from functools import wraps
+import hashlib
+import hmac as hmac_mod
 import inspect
 import json
 import logging
 import os
+from pathlib import Path
 import time
+from typing import Any, AsyncGenerator, Dict, List, Optional, Union
+from urllib.parse import parse_qs, quote as url_quote, urlencode, urlparse
 import uuid
-from functools import wraps
-from typing import AsyncGenerator, Optional, Dict, Any, List, Union
-from urllib.parse import urlencode
+import zlib
+from datetime import datetime, timezone
 
 import httpx
-from playwright.async_api import async_playwright, BrowserContext, Page
-from playwright_stealth import Stealth
+
+from .bidi_transport import (
+    BiDiClient,
+    LocalSocks5Relay,
+    _to_bidi_local_value,
+    wait_for_bidi_endpoint,
+)
 from .browser_operation import BrowserOperationGate
+from .camoufox_fingerprint import (
+    _start_stdout_drain,
+    build_camoufox_env,
+    ensure_camoufox_executable,
+    find_camoufox_executable,
+    load_or_create_account_camoufox_config,
+    write_camoufox_user_js,
+)
+from .camoufox_liveview import CamoufoxLiveView, has_display
+from .camoufox_profile import (
+    ProfileLease,
+    acquire_profile_lease,
+    clear_stale_firefox_profile_locks,
+    prune_camoufox_profile_bloat,
+    restore_startup_cache,
+    save_startup_cache,
+)
+from .dola_config import (
+    DOLA_CHAT_URL,
+    DOLA_COMPLETION_URL,
+    DOLA_COOKIE_DOMAIN,
+    DOLA_DEFAULT_BOT_ID,
+    DOLA_DEFAULT_LANGUAGE,
+    DOLA_DEFAULT_LOCALE,
+    DOLA_DEFAULT_REGION,
+    DOLA_DEFAULT_TIMEZONE,
+    DOLA_IMAGEX_REGION,
+    DOLA_IMAGEX_SERVICE,
+    DOLA_PC_VERSION,
+    DOLA_SAMANTHA_COMPLETION_URL,
+    DOLA_TEA_CACHE_KEY,
+    DOLA_TOS_FALLBACK_HOST,
+    DOLA_URL,
+    DOLA_VERSION_CODE,
+    DOLA_WEB_AID,
+    get_configured_proxy,
+    get_default_profile_dir,
+    get_env,
+    resolve_dola_image_model,
+    resolve_dola_video_model,
+)
+from .proxy_utils import mask_proxy_url, normalize_proxy_url, proxy_needs_relay
+from .redaction import redact_sensitive_text
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("doubao2api.browser_client")
 
-DOUBAO_URL = "https://www.doubao.com"
-CHAT_URL = f"{DOUBAO_URL}/chat/"
-COMPLETION_URL = f"{DOUBAO_URL}/chat/completion"
-SAMANTHA_COMPLETION_URL = f"{DOUBAO_URL}/samantha/chat/completion"
-DEFAULT_BOT_ID = "7338286299411103781"
+# Exported constants (Dola International)
+CHAT_URL = DOLA_CHAT_URL
+COMPLETION_URL = DOLA_COMPLETION_URL
+SAMANTHA_COMPLETION_URL = DOLA_SAMANTHA_COMPLETION_URL
+DEFAULT_BOT_ID = DOLA_DEFAULT_BOT_ID
 
 
 class VideoQuotaExceeded(RuntimeError):
@@ -44,127 +97,124 @@ class VideoQuotaExceeded(RuntimeError):
 def _serialized_browser_operation(method):
     if inspect.isasyncgenfunction(method):
         @wraps(method)
-        async def _stream(self, *args, **kwargs):
-            async with self.operation_gate.lease():
-                iterator = method(self, *args, **kwargs).__aiter__()
-                try:
-                    async for item in iterator:
-                        yield item
-                finally:
-                    close = getattr(iterator, "aclose", None)
-                    if close:
-                        await close()
-        return _stream
+        async def _gen(self, *args, **kwargs):
+            gate = getattr(self, "operation_gate", None)
+            if gate is None:
+                async for item in method(self, *args, **kwargs):
+                    yield item
+                return
+            async with gate.lease():
+                async for item in method(self, *args, **kwargs):
+                    yield item
+
+        return _gen
 
     @wraps(method)
     async def _call(self, *args, **kwargs):
-        async with self.operation_gate.lease():
+        gate = getattr(self, "operation_gate", None)
+        if gate is None:
             return await method(self, *args, **kwargs)
+        async with gate.lease():
+            return await method(self, *args, **kwargs)
+
     return _call
 
 
 def resolve_headless_mode(val: Optional[Union[bool, str]] = None) -> bool:
+    """Resolve headless mode from bool, string, or DOLA_HEADLESS / DOUBAO_HEADLESS env var.
+
+    Defaults to headless (`True`) so the server never steals focus or auto-pops a GUI window;
+    interactive login & per-account profile management use Web LiveView (or explicit `headless=False`).
     """
-    Resolve headless setting based on parameter, env DOUBAO_HEADLESS, and system display capability.
-    - 'auto' / None:
-        - Windows (os.name == 'nt') or macOS: False (headed for ease of login)
-        - Linux/other: False if DISPLAY or WAYLAND_DISPLAY is set, else True (headless)
-    - 'true' / True: True (always headless)
-    - 'false' / False: False. If on Linux/headless env without DISPLAY, raise RuntimeError.
-    """
+    if isinstance(val, bool):
+        return val
     if val is None:
-        env_val = os.environ.get("DOUBAO_HEADLESS", "auto").strip().lower()
-    elif isinstance(val, bool):
-        env_val = "true" if val else "false"
+        raw = get_env("DOLA_HEADLESS", "DOUBAO_HEADLESS", "true").strip().lower()
     else:
-        env_val = str(val).strip().lower()
+        raw = str(val).strip().lower()
 
-    has_display = True
-    if os.name != "nt":
-        has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
-
-    if env_val in ("true", "1", "yes"):
-        return True
-    elif env_val in ("false", "0", "no"):
-        if not has_display:
-            raise RuntimeError(
-                "DOUBAO_HEADLESS is set to 'false', but no display server (DISPLAY / WAYLAND_DISPLAY) "
-                "is available in this environment. Please run with DOUBAO_HEADLESS=true, or provide an X11/wayland display."
-            )
+    if raw in ("false", "0", "no"):
         return False
-    elif env_val == "auto":
-        if os.name == "nt":
-            return False
-        return not has_display
-    else:
-        log.warning("Unknown DOUBAO_HEADLESS='%s', defaulting to auto", env_val)
-        if os.name == "nt":
-            return False
-        return not has_display
-
+    return True
 
 def resolve_memory_type(
     memory_type: Optional[int] = None,
     save_history: Optional[bool] = None,
 ) -> int:
-    """
-    Resolve Doubao memory_type:
-    0 = normal conversation (saved to web history, not 阅后即焚)
-    2 = ephemeral / burn-after-reading (does NOT show in web chat history)
-
-    Priority:
-    1. Explicit memory_type argument (0 or 2)
-    2. save_history flag (True -> 0, False -> 2)
-    3. SAVE_CHAT_HISTORY / DOUBAO_AUTO_DELETE_CONV env vars:
-       - If SAVE_CHAT_HISTORY is true -> 0
-       - If DOUBAO_AUTO_DELETE_CONV is false/0/no -> 0
-       - Otherwise default to 2 (ephemeral)
-    """
+    """Resolve ByteDance memory_type: 0 = save to history, 2 = ephemeral (no history)."""
     if memory_type is not None:
         return int(memory_type)
     if save_history is not None:
         return 0 if save_history else 2
-    save_env = os.environ.get("SAVE_CHAT_HISTORY", "").strip().lower()
-    if save_env in ("true", "1", "yes"):
+    env_save = (os.environ.get("SAVE_CHAT_HISTORY") or get_env("DOLA_SAVE_HISTORY", "DOUBAO_SAVE_HISTORY", "")).strip().lower()
+    if env_save in ("true", "1", "yes"):
         return 0
-    auto_del_env = os.environ.get("DOUBAO_AUTO_DELETE_CONV", "true").strip().lower()
-    if auto_del_env in ("false", "0", "no"):
+    if env_save in ("false", "0", "no"):
+        return 2
+    auto_del = get_env("DOLA_AUTO_DELETE_CONV", "DOUBAO_AUTO_DELETE_CONV", "true").strip().lower()
+    if auto_del in ("false", "0", "no"):
         return 0
     return 2
 
 
 class BrowserClient:
-    """Manages Playwright for login and in-browser fetch for API calls."""
+    """Manages native Camoufox via WebDriver BiDi for Dola auth, signing, and in-browser streaming."""
 
-    def __init__(self, headless: Optional[Union[bool, str]] = None, user_data_dir: Optional[str] = None):
+    def __init__(
+        self,
+        headless: Optional[Union[bool, str]] = None,
+        user_data_dir: Optional[str] = None,
+        proxy_url: Optional[str] = None,
+    ):
         self._raw_headless = headless
         self.headless = resolve_headless_mode(headless)
         self.operation_gate = BrowserOperationGate()
-        self.user_data_dir = user_data_dir
-        self._playwright = None
-        self._context: Optional[BrowserContext] = None
-        self._page: Optional[Page] = None
+        self.user_data_dir = os.path.expanduser(user_data_dir) if user_data_dir else get_default_profile_dir()
+
+        raw_proxy = proxy_url if proxy_url is not None else get_configured_proxy()
+        self._proxy_url: Optional[str] = normalize_proxy_url(raw_proxy) if raw_proxy else None
+
+        # Native Camoufox + BiDi runtime handles
+        self._executable_path: Optional[str] = None
+        self._process: Optional[asyncio.subprocess.Process] = None
+        self._stdout_drain_task: Optional[asyncio.Task] = None
+        self._bidi: Optional[BiDiClient] = None
+        self._context_id: Optional[str] = None
+        self._relay: Optional[LocalSocks5Relay] = None
+        self._profile_lease: Optional[ProfileLease] = None
+        self._account_dir: Optional[Path] = None
+        self._profile_dir: Optional[Path] = None
+        self._fingerprint_config: Dict[str, Any] = {}
+
         self._http: Optional[httpx.AsyncClient] = None
         self._ready = False
         self._device_id: Optional[str] = None
         self._web_id: Optional[str] = None
         self._fp: Optional[str] = None
-        # msToken rotation: updated from x-ms-token response header
+        self._region: str = DOLA_DEFAULT_REGION
+        self._language: str = DOLA_DEFAULT_LANGUAGE
+        self._tz_name: str = DOLA_DEFAULT_TIMEZONE
         self._ms_token: str = ""
-        # Robustness: failure tracking
+
+        # Robustness / failure tracking
         self._consecutive_failures: int = 0
         self._last_error_code: int = 0
         self._last_error_category: str = ""
         self._needs_captcha: bool = False
         self._mode_lock: asyncio.Lock = asyncio.Lock()
-        # Stream bridge: request_id -> asyncio.Queue for SSE chunks
-        self._stream_queues: Dict[str, asyncio.Queue] = {}
         self._bridge_ready: bool = False
         self._user_agent: str = ""
-        self._browser_name: str = "Chromium"
+        self._browser_name: str = "Camoufox (WebDriver BiDi)"
+
+        # LiveView instance for Admin Web interactive browser control
+        self.liveview: CamoufoxLiveView = CamoufoxLiveView()
 
         from .account_manager import AccountManager
         self.account_manager = AccountManager(storage_dir=self.user_data_dir)
+
+    # ------------------------------------------------------------------
+    # Properties
+    # ------------------------------------------------------------------
 
     @property
     def browser_name(self) -> str:
@@ -175,8 +225,16 @@ class BrowserClient:
         return self._ready
 
     @property
-    def page(self) -> Optional[Page]:
-        return self._page
+    def proxy_url(self) -> Optional[str]:
+        return self._proxy_url
+
+    @property
+    def bidi(self) -> Optional[BiDiClient]:
+        return self._bidi
+
+    @property
+    def context_id(self) -> Optional[str]:
+        return self._context_id
 
     @property
     def needs_captcha(self) -> bool:
@@ -193,6 +251,10 @@ class BrowserClient:
     @property
     def last_error_category(self) -> str:
         return self._last_error_category
+
+    # ------------------------------------------------------------------
+    # Status / Failure Tracking
+    # ------------------------------------------------------------------
 
     def record_success(self):
         """Reset failure counters on successful request."""
@@ -213,94 +275,6 @@ class BrowserClient:
         self._last_error_category = ""
         log.info("Captcha flag cleared")
 
-    @_serialized_browser_operation
-    async def is_captcha_visible(self) -> bool:
-        """Check whether a real captcha modal/slider/iframe is actually visible in the browser DOM."""
-        if not self._page:
-            return False
-        try:
-            # Fast check across all iframes for ByteDance captcha/verify endpoints
-            has_iframe = await self._page.evaluate("""() => {
-                const frames = Array.from(document.querySelectorAll('iframe'));
-                return frames.some(f => {
-                    const s = (f.src || '').toLowerCase();
-                    return s.includes('verify') || s.includes('captcha') || s.includes('zijieapi') || s.includes('bytedance.com');
-                });
-            }""")
-            if has_iframe:
-                return True
-        except Exception:
-            pass
-
-        try:
-            selectors = [
-                '#captcha_container',
-                '.captcha_verify_container',
-                '#captcha-verify-image',
-                '.secsdk-captcha-wrapper',
-                '.verify-bar-close',
-                '.secsdk-captcha-drag-icon',
-                '[class*="captcha-modal"]',
-                '[class*="captcha_verify"]',
-                '.semi-modal:has-text("验证")',
-                'iframe[src*="verify"]',
-                'iframe[src*="captcha"]',
-                'iframe[src*="bytedance.com"]',
-                'iframe[src*="zijieapi.com"]',
-            ]
-            for sel in selectors:
-                loc = self._page.locator(sel)
-                cnt = await loc.count()
-                if cnt > 0:
-                    for i in range(cnt):
-                        if await loc.nth(i).is_visible():
-                            return True
-            return False
-        except Exception:
-            return False
-
-    @_serialized_browser_operation
-    async def auto_popup_for_captcha(self) -> bool:
-        """If captcha is detected, ensure browser window is visible and brought to front."""
-        can_display = (os.name == "nt") or bool(os.environ.get("DISPLAY"))
-        if not can_display:
-            log.info("Cannot auto-popup browser window: no desktop GUI display available")
-            return False
-
-        try:
-            await self.switch_mode(headless=False)
-        except Exception as e:
-            log.error("Failed to bring browser window to front: %s", e)
-            return False
-
-        if self._page:
-            try:
-                await self._page.bring_to_front()
-            except Exception:
-                pass
-        return True
-
-    @_serialized_browser_operation
-    async def try_auto_solve_captcha(self) -> bool:
-        """Attempt to automatically detect and solve slider captcha.
-
-        Returns True if solved, False otherwise.
-        """
-        if not self._page:
-            return False
-        try:
-            from .captcha_solver import SliderCaptchaSolver
-            solver = SliderCaptchaSolver()
-            solved = await solver.detect_and_solve(self._page)
-            if solved:
-                self._ready = True
-                log.info("Auto-solved slider captcha successfully!")
-                return True
-            return False
-        except Exception as e:
-            log.warning("Automated captcha solver error: %s", e)
-            return False
-
     def record_failure(
         self,
         error_code: int = 0,
@@ -308,15 +282,14 @@ class BrowserClient:
         verification_required: Optional[bool] = None,
         error_category: Optional[str] = None,
     ):
-        """Track failures and mark verification only when the failure was classified as such."""
+        """Track failures and mark verification only when classified as such."""
         self._consecutive_failures += 1
         self._last_error_code = error_code
-        self._last_error_category = error_category or (
-            "verification"
-            if verification_required is True or (verification_required is None and error_code == 710022002)
-            else ""
+        is_verify = verification_required is True or (
+            verification_required is None and error_code == 710022002
         )
-        if verification_required is True or (verification_required is None and error_code == 710022002):
+        self._last_error_category = error_category or ("verification" if is_verify else "")
+        if is_verify:
             self._needs_captcha = True
             log.warning("Verification flag marked on error code %s", error_code)
         if self._consecutive_failures >= 10 and not self._needs_captcha:
@@ -324,676 +297,822 @@ class BrowserClient:
             self._ready = False
 
     # ------------------------------------------------------------------
-    # Lifecycle
+    # Low-level BiDi helpers
     # ------------------------------------------------------------------
 
-    @classmethod
-    def get_candidate_browsers(cls) -> List[Dict[str, Any]]:
-        """
-        Build a prioritized list of browser launch candidate configurations.
-        Supports:
-          1. Custom env override (DOUBAO_BROWSER_CHANNEL or DOUBAO_BROWSER_BIN)
-          2. Google Chrome (channel="chrome" or system paths)
-          3. Microsoft Edge (channel="msedge" - pre-installed on 100% of modern Windows)
-          4. Brave Browser (via executable path)
-          5. Other Chromium-based browsers (Vivaldi, Opera, 360, etc.)
-          6. Bundled Playwright Chromium (channel=None)
-        """
-        import shutil
-        import sys
-        candidates = []
+    async def is_alive(self) -> bool:
+        """Return True if Camoufox process and WebDriver BiDi connection are healthy."""
+        if (
+            self._process is None
+            or self._process.returncode is not None
+            or self._bidi is None
+            or self._bidi._closed
+            or not self._context_id
+        ):
+            return False
+        try:
+            res = await self._bidi.evaluate(
+                self._context_id, "1 + 1", await_promise=False, timeout=5.0
+            )
+            return res == 2
+        except Exception:
+            return False
 
-        # 1. Custom env overrides
-        custom_ch = os.environ.get("DOUBAO_BROWSER_CHANNEL", "").strip().lower()
-        if custom_ch:
-            candidates.append({"channel": custom_ch, "desc": f"自定义通道 ({custom_ch})"})
+    async def evaluate(self, expression: str, *, await_promise: bool = True, timeout: float = 30.0) -> Any:
+        """Evaluate a JS expression in the active Dola browser context."""
+        if not self._bidi or not self._context_id:
+            raise RuntimeError("Camoufox browser not running")
+        return await self._bidi.evaluate(
+            self._context_id, expression, await_promise=await_promise, timeout=timeout
+        )
 
-        custom_bin = os.environ.get("DOUBAO_BROWSER_BIN", "").strip()
-        if custom_bin and os.path.exists(custom_bin):
-            candidates.append({"executable_path": custom_bin, "desc": f"自定义浏览器路径 ({custom_bin})"})
-
-        # 2. OS-specific auto-discovery
-        if os.name == "nt":
-            # Playwright Universal Standalone Chromium (完全独立、免安装、不与系统Chrome冲突)
-            base_dir = os.path.expandvars(r"%LOCALAPPDATA%\ms-playwright")
-            if os.path.exists(base_dir):
-                for item in sorted(os.listdir(base_dir), reverse=True):
-                    if item.startswith("chromium-") and "headless" not in item:
-                        exe = os.path.join(base_dir, item, "chrome-win", "chrome.exe")
-                        if os.path.exists(exe):
-                            candidates.append({"executable_path": exe, "desc": f"Playwright 通用独立 Chromium ({item})"})
-                            break
-
-            # Chrome
-            chrome_paths = [
-                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-                r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-                os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
-            ]
-            if any(os.path.exists(p) for p in chrome_paths):
-                candidates.append({"channel": "chrome", "desc": "Google Chrome (系统安装)"})
-
-            # Edge (Windows 10/11 保证预装)
-            edge_paths = [
-                r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-                r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-                os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\Edge\Application\msedge.exe"),
-            ]
-            if any(os.path.exists(p) for p in edge_paths):
-                candidates.append({"channel": "msedge", "desc": "Microsoft Edge (系统自带)"})
-
-            # Brave
-            brave_paths = [
-                r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
-                os.path.expandvars(r"%LOCALAPPDATA%\BraveSoftware\Brave-Browser\Application\brave.exe"),
-            ]
-            for bp in brave_paths:
-                if os.path.exists(bp):
-                    candidates.append({"executable_path": bp, "desc": f"Brave Browser ({bp})"})
-                    break
-
-            # Other Chromium-based browsers (Vivaldi, Opera)
-            other_paths = [
-                r"C:\Program Files\Vivaldi\Application\vivaldi.exe",
-                os.path.expandvars(r"%LOCALAPPDATA%\Vivaldi\Application\vivaldi.exe"),
-                os.path.expandvars(r"%LOCALAPPDATA%\Programs\Opera\launcher.exe"),
-            ]
-            for op in other_paths:
-                if os.path.exists(op):
-                    candidates.append({"executable_path": op, "desc": f"Chromium 内核浏览器 ({op})"})
-                    break
-
-        elif sys.platform == "darwin":
-            # macOS
-            mac_chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-            mac_edge = "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"
-            mac_brave = "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"
-            mac_chromium = "/Applications/Chromium.app/Contents/MacOS/Chromium"
-            if os.path.exists(mac_chrome):
-                candidates.append({"channel": "chrome", "desc": "Google Chrome (macOS)"})
-            if os.path.exists(mac_edge):
-                candidates.append({"channel": "msedge", "desc": "Microsoft Edge (macOS)"})
-            if os.path.exists(mac_brave):
-                candidates.append({"executable_path": mac_brave, "desc": "Brave Browser (macOS)"})
-            if os.path.exists(mac_chromium):
-                candidates.append({"executable_path": mac_chromium, "desc": "Chromium (macOS)"})
-
-        else:
-            # Linux
-            for bin_name in ("google-chrome", "google-chrome-stable"):
-                if shutil.which(bin_name):
-                    candidates.append({"channel": "chrome", "desc": f"Google Chrome ({bin_name})"})
-                    break
-            for bin_name in ("microsoft-edge", "microsoft-edge-stable"):
-                if shutil.which(bin_name):
-                    candidates.append({"channel": "msedge", "desc": f"Microsoft Edge ({bin_name})"})
-                    break
-            for bin_name in ("chromium", "chromium-browser", "brave-browser"):
-                p = shutil.which(bin_name)
-                if p:
-                    candidates.append({"executable_path": p, "desc": f"Chromium/Brave ({p})"})
-                    break
-
-        # 3. Bundled Chromium (Playwright native)
-        candidates.append({"desc": "Playwright 内置 Chromium 内核"})
-
-        # 4. Standard channels fallback
-        for ch in ("chrome", "msedge", "chromium"):
-            if not any(c.get("channel") == ch for c in candidates):
-                candidates.append({"channel": ch, "desc": f"系统 '{ch}' 通道"})
-
-        return candidates
+    async def get_page_url(self) -> str:
+        """Return current browser URL."""
+        if not self._bidi or not self._context_id:
+            return ""
+        try:
+            return str(await self._bidi.evaluate(self._context_id, "location.href", await_promise=False, timeout=5.0) or "")
+        except Exception:
+            return ""
 
     @_serialized_browser_operation
-    async def start(self):
-        """Launch browser window or headless instance, navigate to Doubao, init httpx client."""
-        self.headless = resolve_headless_mode(self._raw_headless)
-        mode_str = "headless" if self.headless else "headed native desktop window"
-        log.info("Starting BrowserClient (%s)", mode_str)
-        # Clean stale browser lock files if any were left behind from previous runs
-        if self.user_data_dir and os.path.exists(self.user_data_dir):
-            for lock_name in ("lockfile", "SingletonLock", "SingletonSocket", "SingletonCookie"):
-                lock_file = os.path.join(self.user_data_dir, lock_name)
-                if os.path.exists(lock_file):
-                    try:
-                        os.remove(lock_file)
-                        log.info("Cleaned stale profile lock: %s", lock_file)
-                    except Exception as e:
-                        log.debug("Could not remove lock %s: %s", lock_file, e)
+    async def screenshot(self, *, image_format: str = "png", quality: float = 0.85) -> bytes:
+        """Capture a screenshot of the active Dola page via WebDriver BiDi."""
+        if not self._bidi or not self._context_id:
+            raise RuntimeError("Camoufox browser not running")
+        fmt: Dict[str, Any] = {"type": f"image/{image_format}"}
+        if image_format == "jpeg":
+            fmt["quality"] = quality
+        shot = await self._bidi.command(
+            "browsingContext.captureScreenshot",
+            {"context": self._context_id, "format": fmt},
+            timeout=10.0,
+        )
+        return base64.b64decode(shot.get("data", ""))
 
-        self._playwright = await async_playwright().start()
+    # ------------------------------------------------------------------
+    # Captcha Detection & Auto-Solving
+    # ------------------------------------------------------------------
 
-        launch_args = [
-            "--disable-blink-features=AutomationControlled",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--no-sandbox",
-            "--disable-background-timer-throttling",
-            "--disable-backgrounding-occluded-windows",
-            "--disable-renderer-backgrounding",
-        ]
+    @_serialized_browser_operation
+    async def is_captcha_visible(self) -> bool:
+        """Check whether a ByteDance / Dola captcha modal/slider/iframe is visible in DOM."""
+        if not self._bidi or not self._context_id:
+            return False
+        try:
+            visible = await self._bidi.evaluate(
+                self._context_id,
+                """(() => {
+                    const frames = Array.from(document.querySelectorAll('iframe'));
+                    for (const f of frames) {
+                        const s = (f.src || '').toLowerCase();
+                        if (
+                            s.includes('verify') || s.includes('captcha') ||
+                            s.includes('zijieapi') || s.includes('byteoversea') ||
+                            s.includes('bytedance.com') || s.includes('ttwstatic')
+                        ) {
+                            const r = f.getBoundingClientRect();
+                            if (r.width > 10 && r.height > 10) return true;
+                        }
+                    }
+                    const sels = [
+                        '#captcha_container', '.captcha_verify_container',
+                        '#captcha-verify-image', '.secsdk-captcha-wrapper',
+                        '.verify-bar-close', '.secsdk-captcha-drag-icon',
+                        '[class*="captcha-modal"]', '[class*="captcha_verify"]'
+                    ];
+                    for (const sel of sels) {
+                        const el = document.querySelector(sel);
+                        if (el) {
+                            const r = el.getBoundingClientRect();
+                            if (r.width > 10 && r.height > 10) return true;
+                        }
+                    }
+                    return false;
+                })()""",
+                await_promise=False,
+                timeout=8.0,
+            )
+            return bool(visible)
+        except Exception:
+            return False
 
-        launch_kwargs = {
-            "headless": self.headless,
-            "args": launch_args,
-            "viewport": {"width": 1280, "height": 720},
-            "locale": "zh-CN",
+    @_serialized_browser_operation
+    async def auto_popup_for_captcha(self) -> bool:
+        """If captcha is detected and a desktop GUI is present, switch to windowed mode."""
+        if not has_display():
+            log.info("Cannot auto-popup browser window: no GUI display (use Web LiveView in /admin instead)")
+            return False
+        try:
+            return await self.switch_mode(headless=False)
+        except Exception as exc:
+            log.error("Failed to switch Camoufox to windowed mode: %s", exc)
+            return False
+
+    @_serialized_browser_operation
+    async def try_auto_solve_captcha(self) -> bool:
+        """Attempt automated slider captcha solving via WebDriver BiDi input actions."""
+        if not self._bidi or not self._context_id:
+            return False
+        try:
+            from .captcha_solver import SliderCaptchaSolver
+
+            solver = SliderCaptchaSolver()
+            solved = await solver.detect_and_solve(self._bidi, self._context_id)
+            if solved:
+                self._ready = True
+                self._needs_captcha = False
+                log.info("Auto-solved slider captcha via Camoufox BiDi!")
+                return True
+            return False
+        except Exception as exc:
+            log.warning("Automated captcha solver error: %s", exc)
+            return False
+
+    # ------------------------------------------------------------------
+    # Lifecycle (Camoufox + BiDi + LocalSocks5Relay + ProfileLease)
+    # ------------------------------------------------------------------
+
+    def _active_proxy_url(self) -> Optional[str]:
+        """Resolve effective proxy: active account proxy overrides global proxy."""
+        if self.account_manager:
+            active = self.account_manager.get_active_account()
+            if active and getattr(active, "proxy_url", None):
+                return active.proxy_url
+        return self._proxy_url
+
+    def _build_httpx_client(self, proxy_url: Optional[str]) -> httpx.AsyncClient:
+        kwargs: Dict[str, Any] = {
+            "timeout": httpx.Timeout(120.0, connect=20.0),
+            "follow_redirects": True,
         }
+        if proxy_url:
+            kwargs["proxy"] = proxy_url
+        return httpx.AsyncClient(**kwargs)
 
-        async def _launch_context(extra_kwargs):
-            kw = dict(launch_kwargs)
-            kw.update(extra_kwargs)
-            if self.user_data_dir:
+    def _resolve_active_account_dir(self) -> Path:
+        """Resolve the strictly isolated profile directory for the active account (`accounts/<id>/`)."""
+        base = Path(self.user_data_dir)
+        acc = self.account_manager.get_active_account() if self.account_manager else None
+        if acc:
+            target = Path(self.account_manager.resolve_account_dir(acc.id))
+            # One-time migration from legacy shared `<base>/firefox-profile` into isolated `accounts/<id>/`
+            legacy_profile = base / "firefox-profile"
+            target_profile = target / "firefox-profile"
+            if legacy_profile.exists() and not target_profile.exists():
+                import shutil
+                target.mkdir(parents=True, exist_ok=True)
                 try:
-                    ctx = await self._playwright.chromium.launch_persistent_context(
-                        self.user_data_dir,
-                        **kw
-                    )
-                except Exception as e:
-                    err_str = str(e)
-                    if "ProcessSingleton" in err_str or "Lock file" in err_str or "lockfile" in err_str:
-                        log.warning("Detected lock collision during launch, retrying after clearing lockfile...")
-                        await asyncio.sleep(1.0)
-                        for lock_name in ("lockfile", "SingletonLock", "SingletonSocket", "SingletonCookie"):
-                            lp = os.path.join(self.user_data_dir, lock_name)
-                            if os.path.exists(lp):
-                                try:
-                                    os.remove(lp)
-                                except Exception:
-                                    pass
-                        ctx = await self._playwright.chromium.launch_persistent_context(
-                            self.user_data_dir,
-                            **kw
-                        )
-                    else:
-                        raise
-                page = ctx.pages[0] if ctx.pages else await ctx.new_page()
-                return ctx, page
-            else:
-                b_kwargs = {"headless": self.headless, "args": launch_args}
-                if kw.get("channel"):
-                    b_kwargs["channel"] = kw["channel"]
-                if kw.get("executable_path"):
-                    b_kwargs["executable_path"] = kw["executable_path"]
-                browser = await self._playwright.chromium.launch(**b_kwargs)
-                ctx = await browser.new_context(
-                    viewport={"width": 1280, "height": 720}, locale="zh-CN",
-                )
-                page = await ctx.new_page()
-                return ctx, page
+                    clear_stale_firefox_profile_locks(legacy_profile)
+                    shutil.copytree(legacy_profile, target_profile, symlinks=False, ignore_dangling_symlinks=True)
+                    legacy_fp = base / "camoufox-fingerprint.json"
+                    if legacy_fp.exists() and not (target / "camoufox-fingerprint.json").exists():
+                        shutil.copy2(legacy_fp, target / "camoufox-fingerprint.json")
+                    log.info("Migrated legacy shared profile into isolated account directory %s", target)
+                except Exception as exc:
+                    log.warning("Legacy profile migration failed (%s); starting fresh isolated profile", exc)
+            return target
+        return base / "accounts" / "_default"
 
-        candidates = self.get_candidate_browsers()
-        launched = False
-        last_error = None
+    async def release_if_account(self, account_id: Optional[str] = None) -> None:
+        """Close runtime Camoufox if holding the specified account's isolated profile (or any if None)."""
+        async with self.operation_gate.lease():
+            active_id = getattr(self, "_active_profile_account_id", None)
+            if account_id is None or active_id == account_id or self._process is not None:
+                if account_id is None or active_id == account_id or active_id is None:
+                    await self.close()
 
-        for cand in candidates:
-            cand_desc = cand.get("desc", "unknown")
-            extra = {}
-            if "channel" in cand:
-                extra["channel"] = cand["channel"]
-            if "executable_path" in cand:
-                extra["executable_path"] = cand["executable_path"]
+    async def start(self):
+        """Launch native Camoufox with WebDriver BiDi inside the active account's isolated profile."""
+        if self._raw_headless in (None, "auto"):
+            env_mode = get_env("DOLA_HEADLESS", "DOUBAO_HEADLESS", "true").strip().lower()
+            self.headless = resolve_headless_mode(env_mode)
 
-            try:
-                log.info("尝试启动浏览器: %s (headless=%s) ...", cand_desc, self.headless)
-                self._context, self._page = await _launch_context(extra)
-                self._browser_name = cand_desc
-                log.info("成功启动浏览器: %s (headless=%s)", cand_desc, self.headless)
-                launched = True
-                break
-            except Exception as e:
-                last_error = e
-                log.debug("启动浏览器 %s 失败: %s", cand_desc, e)
+        active_acc = self.account_manager.get_active_account() if self.account_manager else None
+        self._active_profile_account_id = active_acc.id if active_acc else None
+        account_dir = self._resolve_active_account_dir()
+        account_dir.mkdir(parents=True, exist_ok=True)
+        profile_dir = account_dir / "firefox-profile"
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        self._account_dir = account_dir
+        self._profile_dir = profile_dir
 
-        # If all candidates failed, attempt auto-install of Playwright Chromium
-        if not launched:
-            log.warning("未检测到可用的系统浏览器，正在自动下载并安装 Playwright Chromium 内核...")
-            try:
-                import subprocess, sys
-                proc = await asyncio.to_thread(
-                    subprocess.run,
-                    [sys.executable, "-m", "playwright", "install", "chromium"],
-                    capture_output=True,
-                    text=True,
-                    timeout=300
-                )
-                if proc.returncode == 0:
-                    log.info("Playwright Chromium 内核安装成功，正在重新启动...")
-                    self._context, self._page = await _launch_context({})
-                    self._browser_name = "Playwright 内置 Chromium (自动安装)"
-                    launched = True
-                else:
-                    log.error("自动安装 Playwright Chromium 失败: %s", proc.stderr)
-            except Exception as ie:
-                log.error("自动安装 Playwright Chromium 异常: %s", ie)
+        # Acquire cross-process OS kernel lock (flow2api-Camoufox pattern)
+        if self._profile_lease is None or not self._profile_lease.active:
+            self._profile_lease = acquire_profile_lease(
+                account_dir, holder=f"dola2api:{os.getpid()}", wait_seconds=3.0
+            )
 
-        if not launched:
-            log.error("未找到任何可用的 Chromium 内核浏览器 (已尝试 Chrome, Edge, Brave, Chromium)。")
-            raise RuntimeError(
-                "未检测到可用的浏览器。本项目支持 Google Chrome、Microsoft Edge、Brave 或系统 Chromium。"
-                "请安装 Chrome 或 Edge，或在终端执行: playwright install chromium"
-            ) from last_error
+        clear_stale_firefox_profile_locks(profile_dir)
+        restore_startup_cache(account_dir, profile_dir)
 
-        # Stealth patches
-        stealth = Stealth(navigator_languages_override=("zh-CN", "zh"))
-        await stealth.apply_stealth_async(self._page)
+        # Ensure native Camoufox executable (auto-downloads from GitHub Release if absent)
+        exe = await ensure_camoufox_executable()
+        self._executable_path = exe
 
-        # Pre-register fetch bridge
-        await self._setup_fetch_bridge()
+        # Load or generate locked per-profile Windows Firefox fingerprint
+        locale = get_env("DOLA_LOCALE", None, DOLA_DEFAULT_LOCALE)
+        tz = get_env("DOLA_TIMEZONE", None, DOLA_DEFAULT_TIMEZONE)
+        self._tz_name = tz
+        fp_cfg = load_or_create_account_camoufox_config(
+            account_dir, locale=locale, timezone=tz
+        )
+        self._fingerprint_config = fp_cfg
+        self._user_agent = str(fp_cfg.get("navigator.userAgent") or "")
 
-        # Navigate
-        log.info("Navigating to %s", CHAT_URL)
+        # Configure upstream proxy & optional LocalSocks5Relay
+        effective_proxy = self._active_proxy_url()
+        relay_addr = None
+        if effective_proxy and proxy_needs_relay(effective_proxy):
+            self._relay = LocalSocks5Relay(effective_proxy)
+            relay_addr = await self._relay.start()
+            log.info(
+                "Started LocalSocks5Relay on %s:%d -> %s",
+                relay_addr[0],
+                relay_addr[1],
+                mask_proxy_url(effective_proxy),
+            )
+        elif effective_proxy:
+            log.info("Configured direct proxy: %s", mask_proxy_url(effective_proxy))
+
+        write_camoufox_user_js(
+            profile_dir,
+            fp_cfg,
+            proxy_url=None if relay_addr else effective_proxy,
+            relay_addr=relay_addr,
+            headless=self.headless,
+            live_view=False,
+            idle_frame_divisor=1,
+            executable_path=exe,
+        )
+
+        env = build_camoufox_env(
+            fp_cfg,
+            headless=self.headless,
+            live_view=False,
+            profile_dir=profile_dir,
+            executable_path=exe,
+        )
+
+        args = [exe]
+        if self.headless:
+            args.append("--headless")
+        args.extend(
+            ["--remote-debugging-port=0", "-wait-for-browser", "-profile", str(profile_dir)]
+        )
+
+        log.info(
+            "Launching Camoufox (headless=%s, profile=%s, proxy=%s)",
+            self.headless,
+            profile_dir,
+            mask_proxy_url(effective_proxy) or "direct",
+        )
+        self._process = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env=env,
+        )
+
+        ws_url = await wait_for_bidi_endpoint(self._process, timeout=45.0)
+        self._stdout_drain_task = _start_stdout_drain(self._process)
+        self._bidi = await BiDiClient.connect(ws_url, timeout=20.0)
+        await self._bidi.command("session.new", {"capabilities": {}}, timeout=15.0)
+        await self._bidi.command(
+            "session.subscribe", {"events": ["script.message"]}, timeout=10.0
+        )
+        tree = await self._bidi.command("browsingContext.getTree", {}, timeout=15.0)
+        contexts = tree.get("contexts") or []
+        if not contexts:
+            created = await self._bidi.command(
+                "browsingContext.create", {"type": "tab"}, timeout=15.0
+            )
+            self._context_id = str(created.get("context") or "")
+        else:
+            self._context_id = str(contexts[0].get("context") or "")
+
+        if not self._context_id:
+            raise RuntimeError("Camoufox BiDi returned no browsing context")
+
+        self._http = self._build_httpx_client(effective_proxy)
+        self._bridge_ready = True
+
+        # Attach LiveView so /admin can view & interact with this Camoufox instance on demand
+        await self.liveview.attach(self._bidi, self._context_id)
+
+        log.info("Navigating Camoufox to %s ...", CHAT_URL)
+        await self._bidi.command(
+            "browsingContext.navigate",
+            {"context": self._context_id, "url": CHAT_URL, "wait": "complete"},
+            timeout=60.0,
+        )
+        await asyncio.sleep(3)
+
+        # Re-hydrate active account cookies if available
+        if self.account_manager and not await self._has_session_cookie():
+            active = self.account_manager.get_active_account()
+            if active and active.cookies:
+                log.info("Restoring saved cookies for active account '%s'", active.name)
+                await self.inject_cookies_and_reload(active.cookies)
+                return
+
+        await self._check_login_state()
+
+    async def close(self):
+        """Gracefully close BiDi session, Camoufox process, SOCKS5 relay, HTTP client, and profile lock."""
+        self._ready = False
+        self._bridge_ready = False
+
         try:
-            await self._page.goto(CHAT_URL, wait_until="domcontentloaded", timeout=45000)
-            await asyncio.sleep(2)
-        except Exception as e:
-            log.warning("Navigation to %s warning: %s", CHAT_URL, e)
-            if self._page and not self._page.is_closed():
-                try:
-                    await self._page.goto(CHAT_URL, wait_until="commit", timeout=15000)
-                except Exception:
-                    pass
-        try:
-            self._user_agent = await self._page.evaluate("() => navigator.userAgent")
-            log.info("Detected browser User-Agent: %s", self._user_agent)
+            await self.liveview.detach()
         except Exception:
             pass
 
-        # Init httpx
-        self._http = httpx.AsyncClient(timeout=httpx.Timeout(180, connect=10))
-
-        await self._check_login_state()
-        if not self._ready and not self.headless:
-            self.operation_gate.spawn_detached(self._trigger_login_dialog())
-
-    @_serialized_browser_operation
-    async def stop(self):
-        """Close browser and httpx client."""
-        if self._http:
-            await self._http.aclose()
+        if self._http is not None:
+            try:
+                await self._http.aclose()
+            except Exception:
+                pass
             self._http = None
-        if self._context:
+
+        if self._bidi is not None:
             try:
-                await self._context.close()
+                await self._bidi.close()
             except Exception:
                 pass
-        if self._playwright:
+            self._bidi = None
+
+        if self._stdout_drain_task is not None and not self._stdout_drain_task.done():
+            self._stdout_drain_task.cancel()
             try:
-                await self._playwright.stop()
-            except Exception:
+                await self._stdout_drain_task
+            except BaseException:
                 pass
-        self._context = None
-        self._playwright = None
-        self._page = None
-        self._ready = False
-        self._bridge_ready = False
-        # Clean stale browser lock files if any were left behind
-        if self.user_data_dir and os.path.exists(self.user_data_dir):
-            for lock_name in ("lockfile", "SingletonLock", "SingletonSocket", "SingletonCookie"):
-                lock_file = os.path.join(self.user_data_dir, lock_name)
-                if os.path.exists(lock_file):
+            self._stdout_drain_task = None
+
+        if self._process is not None:
+            if self._process.returncode is None:
+                try:
+                    self._process.terminate()
+                    await asyncio.wait_for(self._process.wait(), timeout=6.0)
+                except asyncio.TimeoutError:
                     try:
-                        os.remove(lock_file)
+                        self._process.kill()
+                        await asyncio.wait_for(self._process.wait(), timeout=3.0)
                     except Exception:
                         pass
-        log.info("BrowserClient stopped")
-
-    @_serialized_browser_operation
-    async def is_alive(self) -> bool:
-        """Check if browser process is still responsive."""
-        if not self._page or not self._context:
-            return False
-        if self._page.is_closed():
-            return False
-        try:
-            result = await asyncio.wait_for(
-                self._page.evaluate("1+1"), timeout=15
-            )
-            return result == 2
-        except Exception as e:
-            log.warning("Browser health check failed: %s", e)
-            return False
-
-    @_serialized_browser_operation
-    async def restart(self):
-        """Stop and restart the browser client."""
-        log.info("Restarting BrowserClient...")
-        await self.stop()
-        await asyncio.sleep(2)
-        await self.start()
-        log.info("BrowserClient restarted. ready=%s", self._ready)
-
-    @_serialized_browser_operation
-    async def switch_mode(self, headless: Optional[Union[bool, str]] = None) -> bool:
-        """Ensure browser window is active, healthy, and optionally adjust headless mode."""
-        if headless is not None:
-            self._raw_headless = headless
-            self.headless = resolve_headless_mode(headless)
-        async with self._mode_lock:
-            if self._page and not self._page.is_closed():
-                try:
-                    if await self.is_alive():
-                        if not self.headless:
-                            await self._page.bring_to_front()
-                            log.info("Browser window brought to front")
-                        return True
                 except Exception:
                     pass
-            log.info("Browser window not active or mode switched, relaunching window...")
+            self._process = None
+
+        self._context_id = None
+
+        if self._relay is not None:
+            try:
+                await self._relay.close()
+            except Exception:
+                pass
+            self._relay = None
+
+        if self._profile_dir and self._account_dir:
+            save_startup_cache(self._profile_dir, self._account_dir)
+            prune_camoufox_profile_bloat(self._profile_dir)
+            clear_stale_firefox_profile_locks(self._profile_dir)
+
+        if self._profile_lease is not None:
+            self._profile_lease.release()
+            self._profile_lease = None
+
+    async def restart(self):
+        """Close and relaunch Camoufox."""
+        log.info("Restarting Camoufox browser...")
+        await self.close()
+        await asyncio.sleep(0.8)
+        await self.start()
+
+    @_serialized_browser_operation
+    async def switch_mode(self, headless: bool) -> bool:
+        """Dynamically switch Camoufox between headless and desktop windowed mode."""
+        async with self._mode_lock:
+            if self.headless == headless and await self.is_alive():
+                return True
+            if not headless and not has_display():
+                log.warning("Cannot switch to windowed mode without GUI display; use Web LiveView")
+                return False
+            self.headless = headless
+            self._raw_headless = headless
             await self.restart()
             return await self.is_alive()
 
-    @classmethod
-    def is_profile_logged_in(cls, user_data_dir: Optional[str]) -> bool:
-        """Check if user_data_dir exists and has logged-in marks."""
-        if not user_data_dir or not os.path.exists(user_data_dir):
-            return False
-        # Check explicit flag file
-        flag_file = os.path.join(user_data_dir, ".login_success")
-        if os.path.exists(flag_file) and os.path.getsize(flag_file) > 0:
-            return True
-        cookies_db = os.path.join(user_data_dir, "Default", "Network", "Cookies")
-        if os.path.exists(cookies_db) and os.path.getsize(cookies_db) > 10240:
-            return True
-        return False
+    @_serialized_browser_operation
+    async def set_proxy(self, proxy_url: Optional[str]) -> Optional[str]:
+        """Update global upstream proxy and restart Camoufox if already running."""
+        normalized = normalize_proxy_url(proxy_url) if proxy_url else None
+        changed = normalized != self._proxy_url
+        self._proxy_url = normalized
+        if changed and self._process is not None:
+            await self.restart()
+        return self._proxy_url
 
     # ------------------------------------------------------------------
-    # Login
+    # Cookie Operations (WebDriver BiDi storage.*)
+    # ------------------------------------------------------------------
+
+    async def get_cookies(self, domain: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Retrieve cookies from Camoufox via BiDi `storage.getCookies`."""
+        if not self._bidi or self._bidi._closed:
+            return []
+        params: Dict[str, Any] = {}
+        if domain:
+            params["filter"] = {"domain": domain}
+        res = await self._bidi.command("storage.getCookies", params, timeout=10.0)
+        raw_cookies = res.get("cookies") or []
+        out: List[Dict[str, Any]] = []
+        for c in raw_cookies:
+            c_domain = str(c.get("domain") or "")
+            if domain and domain.lstrip(".") not in c_domain.lstrip("."):
+                continue
+            val_obj = c.get("value")
+            if isinstance(val_obj, dict):
+                val = str(val_obj.get("value") or "")
+            else:
+                val = str(val_obj or "")
+            out.append(
+                {
+                    "name": str(c.get("name") or ""),
+                    "value": val,
+                    "domain": c_domain,
+                    "path": str(c.get("path") or "/"),
+                    "expires": c.get("expiry", -1),
+                    "httpOnly": bool(c.get("httpOnly", False)),
+                    "secure": bool(c.get("secure", False)),
+                }
+            )
+        return out
+
+    async def clear_cookies(self, domain: Optional[str] = None) -> None:
+        """Delete cookies via BiDi `storage.deleteCookies`."""
+        if not self._bidi or self._bidi._closed:
+            return
+        params: Dict[str, Any] = {}
+        if domain:
+            params["filter"] = {"domain": domain}
+        await self._bidi.command("storage.deleteCookies", params, timeout=10.0)
+
+    async def set_cookies(self, cookies: Dict[str, str], domain: str = DOLA_COOKIE_DOMAIN) -> int:
+        """Inject cookie key/value pairs into Camoufox via BiDi `storage.setCookie`."""
+        if not self._bidi or self._bidi._closed:
+            raise RuntimeError("Camoufox BiDi is not connected")
+        count = 0
+        for name, value in cookies.items():
+            if not name:
+                continue
+            await self._bidi.command(
+                "storage.setCookie",
+                {
+                    "cookie": {
+                        "name": str(name),
+                        "value": {"type": "string", "value": str(value)},
+                        "domain": domain,
+                        "path": "/",
+                        "secure": True,
+                        "httpOnly": False,
+                    }
+                },
+                timeout=10.0,
+            )
+            count += 1
+        return count
+
+    async def _has_session_cookie(self) -> bool:
+        cookies = await self.get_cookies()
+        return any(
+            c["name"] in ("sessionid", "sessionid_ss", "sid_tt")
+            and bool(c.get("value"))
+            and "dola.com" in c.get("domain", "")
+            for c in cookies
+        )
+
+    # ------------------------------------------------------------------
+    # Login Detection & Account Switching
     # ------------------------------------------------------------------
 
     @_serialized_browser_operation
     async def _check_login_state(self):
-        """Check if logged in by inspecting session cookies and page DOM."""
-        if self._page and "from_logout=1" in self._page.url:
-            log.info("Page is on from_logout=1, navigating to clean chat URL...")
-            try:
-                await self._page.goto(CHAT_URL, wait_until="load", timeout=30000)
-                await asyncio.sleep(2)
-            except Exception as e:
-                log.warning("Navigation back to CHAT_URL failed: %s", e)
-
-        try:
-            cookies = await self._context.cookies("https://www.doubao.com")
-        except Exception as e:
-            log.warning("Failed to inspect browser cookies (window may have been closed): %s", e)
+        """Check if logged into Dola by inspecting session cookies and DOM indicators."""
+        if not self._bidi or not self._context_id:
             self._ready = False
             return
-        has_session = any(c["name"] == "sessionid" and c.get("value") for c in cookies)
 
-        # Check DOM indicators for true authenticated state
-        has_login_btn = False
+        current_url = await self.get_page_url()
+        if "from_logout=1" in current_url:
+            log.info("Page is on from_logout=1, navigating back to %s", CHAT_URL)
+            try:
+                await self._bidi.command(
+                    "browsingContext.navigate",
+                    {"context": self._context_id, "url": CHAT_URL, "wait": "complete"},
+                    timeout=30.0,
+                )
+                await asyncio.sleep(2)
+            except Exception as exc:
+                log.warning("Navigation back to CHAT_URL failed: %s", exc)
+
         try:
-            btn = self._page.locator('button:has-text("登录"), a:has-text("登录")')
-            if await btn.count() > 0 and await btn.first.is_visible():
-                has_login_btn = True
+            cookies = await self.get_cookies()
+        except Exception as exc:
+            log.warning("Failed to inspect Camoufox cookies: %s", exc)
+            self._ready = False
+            return
+
+        dola_cookies = [c for c in cookies if "dola.com" in c.get("domain", "")]
+        has_session = any(
+            c["name"] in ("sessionid", "sessionid_ss", "sid_tt") and bool(c.get("value"))
+            for c in dola_cookies
+        )
+
+        dom_state = {"has_login_btn": False, "has_avatar": False}
+        try:
+            dom_state = await self._bidi.evaluate(
+                self._context_id,
+                """(() => {
+                    const btns = Array.from(document.querySelectorAll('button, a, [role="button"]'));
+                    let hasLogin = false;
+                    for (const b of btns) {
+                        const txt = (b.innerText || '').trim().toLowerCase();
+                        if (txt === 'log in' || txt === 'sign in' || txt === '登录') {
+                            const r = b.getBoundingClientRect();
+                            if (r.width > 0 && r.height > 0) { hasLogin = true; break; }
+                        }
+                    }
+                    const avatar = document.querySelector('img[class*="avatar"], div[class*="avatar"], [data-testid*="avatar"]');
+                    return { has_login_btn: hasLogin, has_avatar: Boolean(avatar) };
+                })()""",
+                await_promise=False,
+                timeout=8.0,
+            ) or dom_state
         except Exception:
             pass
 
-        has_avatar = False
-        try:
-            avatar = self._page.locator('img[class*="avatar"], div[class*="avatar"]')
-            if await avatar.count() > 0:
-                has_avatar = True
-        except Exception:
-            pass
-
-        # True authenticated state: avatar present, or session cookie without visible login button
-        is_logged_in = has_avatar or (has_session and not has_login_btn)
-        log.info("Login check: has_sessionid=%s, has_avatar=%s, has_login_btn=%s -> is_logged_in=%s",
-                 has_session, has_avatar, has_login_btn, is_logged_in)
+        has_login_btn = bool(dom_state.get("has_login_btn"))
+        has_avatar = bool(dom_state.get("has_avatar"))
+        is_logged_in = (has_session and not has_login_btn) or (has_session and has_avatar)
+        log.info(
+            "Dola login check: has_session=%s, has_avatar=%s, has_login_btn=%s -> logged_in=%s",
+            has_session,
+            has_avatar,
+            has_login_btn,
+            is_logged_in,
+        )
 
         if not is_logged_in:
-            log.info("Not logged in - valid sessionid or avatar not confirmed")
             self._ready = False
-            if self.user_data_dir:
-                flag_file = os.path.join(self.user_data_dir, ".login_success")
-                if os.path.exists(flag_file):
-                    try:
-                        os.remove(flag_file)
-                    except Exception:
-                        pass
+            flag_file = os.path.join(self.user_data_dir, ".login_success")
+            if os.path.exists(flag_file):
+                try:
+                    os.remove(flag_file)
+                except Exception:
+                    pass
             return
 
         self._ready = True
-        if self.user_data_dir:
-            try:
-                os.makedirs(self.user_data_dir, exist_ok=True)
-                with open(os.path.join(self.user_data_dir, ".login_success"), "w", encoding="utf-8") as f:
-                    f.write(str(int(time.time())))
-            except Exception:
-                pass
+        try:
+            os.makedirs(self.user_data_dir, exist_ok=True)
+            with open(os.path.join(self.user_data_dir, ".login_success"), "w", encoding="utf-8") as f:
+                f.write(str(int(time.time())))
+        except Exception:
+            pass
 
         await self._extract_params()
         await self._seed_ms_token()
-        await self._setup_fetch_bridge()
         await self._verify_fetch_hook()
-        await self._wait_for_signing()  # still needed for upload endpoints
-        log.info("Ready! device_id=%s, fetch_hook=%s", self._device_id, self._bridge_ready)
+        await self._wait_for_signing()
+        log.info(
+            "Dola Camoufox client ready! device_id=%s, region=%s, lang=%s",
+            self._device_id,
+            self._region,
+            self._language,
+        )
 
-        # Auto-register default account into account_manager if pool is empty
-        if hasattr(self, "account_manager") and len(self.account_manager.accounts) == 0:
-            try:
-                cookies = await self._context.cookies("https://www.doubao.com")
-                cookie_dict = {c["name"]: c["value"] for c in cookies}
-                if "sessionid" in cookie_dict:
-                    self.account_manager.add_or_update_account(
-                        name="默认账号",
-                        cookies=cookie_dict,
-                        account_id="acc_default",
-                    )
-                    log.info("Auto-registered current session as '默认账号' (acc_default) in account pool")
-            except Exception as e:
-                log.debug("Auto-register default account failed: %s", e)
+        # Auto-register default account into pool if empty
+        if self.account_manager and len(self.account_manager.accounts) == 0:
+            cookie_dict = {c["name"]: c["value"] for c in dola_cookies if c.get("value")}
+            if any(k in cookie_dict for k in ("sessionid", "sessionid_ss", "sid_tt")):
+                self.account_manager.add_or_update_account(
+                    name="Default Dola Account",
+                    cookies=cookie_dict,
+                    account_id="acc_default",
+                )
+                log.info("Auto-registered current Dola session as 'acc_default' in account pool")
 
     async def _extract_params(self):
-        """Extract device_id, web_id, fp from localStorage/cookies."""
+        """Extract device_id, web_id, fp, region, and language from Dola localStorage & cookies."""
         for _ in range(5):
             async with self.operation_gate.lease():
-                params = await self._page.evaluate("""() => {
-                    const result = {};
-                    try {
-                        const samWeb = JSON.parse(localStorage.getItem('samantha_web_web_id') || '{}');
-                        result.device_id = samWeb.web_id || '';
-                    } catch(e) {}
-                    try {
-                        const tea = JSON.parse(localStorage.getItem('__tea_cache_tokens_497858') || '{}');
-                        result.web_id = tea.web_id || '';
-                    } catch(e) {}
-                    const fpCookie = document.cookie.split(';')
-                        .map(c => c.trim())
-                        .find(c => c.startsWith('s_v_web_id='));
-                    result.fp = fpCookie ? fpCookie.split('=')[1] : '';
-                    return result;
-                }""")
-            self._device_id = params.get("device_id", "")
-            self._web_id = params.get("web_id", "")
-            self._fp = params.get("fp", "")
-            if self._device_id and self._web_id:
+                if not self._bidi or not self._context_id:
+                    return
+                params = await self._bidi.evaluate(
+                    self._context_id,
+                    f"""(() => {{
+                        const result = {{}};
+                        try {{
+                            const samWeb = JSON.parse(localStorage.getItem('samantha_web_web_id') || '{{}}');
+                            result.device_id = samWeb.web_id || '';
+                        }} catch(e) {{}}
+                        try {{
+                            const tea = JSON.parse(localStorage.getItem('{DOLA_TEA_CACHE_KEY}') || '{{}}');
+                            result.web_id = tea.web_id || '';
+                        }} catch(e) {{}}
+                        const cookieMap = {{}};
+                        for (const part of document.cookie.split(';')) {{
+                            const idx = part.indexOf('=');
+                            if (idx > 0) {{
+                                cookieMap[part.slice(0, idx).trim()] = part.slice(idx + 1).trim();
+                            }}
+                        }}
+                        result.fp = cookieMap['s_v_web_id'] || '';
+                        result.region = cookieMap['flow_user_country'] || localStorage.getItem('flow_user_country') || '';
+                        result.language = cookieMap['i18next'] || localStorage.getItem('i18nextLng') || '';
+                        return result;
+                    }})()""",
+                    await_promise=False,
+                    timeout=10.0,
+                ) or {}
+            self._device_id = str(params.get("device_id") or "")
+            self._web_id = str(params.get("web_id") or self._device_id or "")
+            self._fp = str(params.get("fp") or "")
+            if params.get("region"):
+                self._region = str(params["region"]).upper()
+            if params.get("language"):
+                self._language = str(params["language"]).split("-", 1)[0].lower()
+            if self._device_id:
                 break
             await asyncio.sleep(1)
-        log.info("Params: device_id=%s, web_id=%s, fp=%s",
-                 self._device_id, self._web_id, self._fp[:20] if self._fp else "")
 
     async def _wait_for_signing(self):
-        """Wait for bdms.frontierSign to become available (legacy, kept for upload signing)."""
-        for i in range(12):  # up to 60s
+        """Wait for window.bdms.frontierSign to become available."""
+        for i in range(12):
             async with self.operation_gate.lease():
-                has_sign = await self._page.evaluate(
-                    "() => typeof window.bdms?.frontierSign === 'function'"
+                if not self._bidi or not self._context_id:
+                    return
+                has_sign = await self._bidi.evaluate(
+                    self._context_id,
+                    "typeof window.bdms?.frontierSign === 'function'",
+                    await_promise=False,
+                    timeout=8.0,
                 )
             if has_sign:
-                log.info("bdms.frontierSign available after %ds", (i + 1) * 5)
+                log.info("bdms.frontierSign ready after %ds", (i + 1) * 2)
                 return
-            await asyncio.sleep(5)
-        log.warning("bdms.frontierSign not available after 60s - signing may fail")
+            await asyncio.sleep(2)
+        log.warning("bdms.frontierSign not detected after 24s - upload signing may fail")
 
-    @_serialized_browser_operation
-    async def _setup_fetch_bridge(self):
-        """Register expose_function callback for streaming data from browser to Python."""
-        if self._bridge_ready:
-            return
-
-        async def _on_stream_chunk(request_id: str, chunk_json: str):
-            """Called from browser JS for each SSE chunk or completion signal."""
-            queue = self._stream_queues.get(request_id)
-            if queue:
-                await queue.put(chunk_json)
-
-        try:
-            await self._page.expose_function("__doubaoStreamChunk", _on_stream_chunk)
-            self._bridge_ready = True
-            log.info("Fetch bridge registered (expose_function ready)")
-        except Exception as e:
-            # May already be registered if page didn't navigate
-            if "already been registered" in str(e).lower():
-                self._bridge_ready = True
-                log.info("Fetch bridge already registered")
-            else:
-                log.error("Failed to register fetch bridge: %s", e)
-                raise
-
-    async def _verify_fetch_hook(self):
-        """Verify ByteDance's fetch interceptor is active (adds a_bogus)."""
-        for i in range(15):  # up to 30s
+    async def _verify_fetch_hook(self) -> bool:
+        """Verify ByteDance's in-page fetch interceptor is active (auto-injects msToken & a_bogus)."""
+        for i in range(10):
             async with self.operation_gate.lease():
-                hooked = await self._page.evaluate("""() => {
-                    try {
-                        const s = window.fetch.toString();
-                        return !s.includes('native code');
-                    } catch(e) { return false; }
-                }""")
+                if not self._bidi or not self._context_id:
+                    return False
+                hooked = await self._bidi.evaluate(
+                    self._context_id,
+                    "(() => { try { return !window.fetch.toString().includes('native code'); } catch(e) { return false; } })()",
+                    await_promise=False,
+                    timeout=8.0,
+                )
             if hooked:
-                log.info("Fetch hook verified active after %ds", (i + 1) * 2)
+                log.info("Dola fetch hook active after %ds", (i + 1) * 2)
                 return True
             await asyncio.sleep(2)
-        log.warning("Fetch hook NOT detected after 30s - requests may fail")
+        log.warning("Dola fetch hook not detected after 20s")
         return False
 
     async def wait_for_login(self, timeout: int = 180) -> bool:
-        """Wait for user to scan QR code."""
+        """Poll until the user completes login (Google, Lark, or QR scan) in Camoufox / LiveView."""
         await self._trigger_login_dialog()
-        log.info("Waiting for QR scan login (timeout=%ds)...", timeout)
-        try:
-            for _ in range(timeout):
-                await asyncio.sleep(1)
-                async with self.operation_gate.lease():
-                    avatar = self._page.locator('img[class*="avatar"], div[class*="avatar"], span:has-text("套餐"), div:has-text("套餐")')
-                    has_avatar = await avatar.count() > 0
-                    login_btn = self._page.locator('button:has-text("登录")')
-                    has_login_button = await login_btn.count() > 0
-                if has_avatar:
-                    log.info("Detected user profile/avatar in DOM!")
-                    break
-                if not has_login_button:
-                    log.info("Login button no longer visible!")
-                    break
-
-            await asyncio.sleep(2)
-            await self._extract_params()
-            await self._seed_ms_token()
-            await self._setup_fetch_bridge()
-            await self._verify_fetch_hook()
-            await self._wait_for_signing()
-            self._ready = True
-            log.info("Login successful and client ready!")
-            return True
-        except Exception as e:
-            log.error("Login check error: %s", e)
-            return False
+        log.info("Waiting for Dola login (timeout=%ds)...", timeout)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            await asyncio.sleep(1.5)
+            await self._check_login_state()
+            if self._ready:
+                return True
+        return False
 
     async def _trigger_login_dialog(self):
-        """Click login button to show QR code dialog."""
-        for _ in range(10):
-            try:
-                async with self.operation_gate.lease():
-                    btn = self._page.locator('button:has-text("登录")')
-                    if await btn.count() > 0:
-                        await btn.first.click()
-                        log.info("Clicked '登录' button to display QR code dialog")
-                        return
-            except Exception:
-                pass
-            await asyncio.sleep(1)
-
+        """Click 'Log In' button on Dola if modal is not already shown."""
+        if not self._bidi or not self._context_id:
+            return
+        try:
+            async with self.operation_gate.lease():
+                await self._bidi.evaluate(
+                    self._context_id,
+                    """(() => {
+                        const modal = document.querySelector('[role="dialog"], .semi-modal');
+                        if (modal) return false;
+                        const btns = Array.from(document.querySelectorAll('button, a, [role="button"]'));
+                        const target = btns.find(b => {
+                            const t = (b.innerText || '').trim().toLowerCase();
+                            return t === 'log in' || t === 'sign in' || t === '登录';
+                        });
+                        if (target) { target.click(); return true; }
+                        return false;
+                    })()""",
+                    await_promise=False,
+                    timeout=8.0,
+                )
+        except Exception:
+            pass
 
     @_serialized_browser_operation
     async def inject_cookies_and_reload(self, cookies: Dict[str, str]) -> bool:
-        """Inject cookies from QR login or user import into browser context and reload.
-
-        Returns True if login state is confirmed after reload.
-        """
-        if not self._context or not self._page or not await self.is_alive():
-            log.info("inject_cookies: browser not active, restarting before inject...")
+        """Inject Dola cookies into Camoufox, reload, and verify authenticated state."""
+        if not await self.is_alive():
+            log.info("inject_cookies: Camoufox not active, restarting...")
             await self.restart()
-
-        if not self._context or not self._page:
-            log.error("inject_cookies: browser could not be started")
+        if not self._bidi or not self._context_id:
             return False
 
-        # Build cookie list for Playwright
-        pw_cookies = []
-        for name, value in cookies.items():
-            pw_cookies.append({
-                "name": name,
-                "value": value,
-                "domain": ".doubao.com",
-                "path": "/",
-            })
+        count = await self.set_cookies(cookies, domain=DOLA_COOKIE_DOMAIN)
+        log.info("Injected %d cookies into Camoufox for %s", count, DOLA_COOKIE_DOMAIN)
 
-        await self._context.add_cookies(pw_cookies)
-        log.info("Injected %d cookies into browser context", len(pw_cookies))
-
-        # Reload page to pick up new session
-        await self._page.reload(wait_until="load", timeout=30000)
+        await self._bidi.command(
+            "browsingContext.navigate",
+            {"context": self._context_id, "url": CHAT_URL, "wait": "complete"},
+            timeout=45.0,
+        )
         await asyncio.sleep(3)
-
-        # Re-check login state
         await self._check_login_state()
         return self._ready
 
     @_serialized_browser_operation
     async def switch_to_account(self, account_id: str) -> bool:
-        """Switch browser session to specified account from the account pool."""
+        """Switch Camoufox session to the specified account using its strictly isolated profile & proxy."""
         acc = self.account_manager.get_account(account_id)
-        if not acc:
-            log.error("switch_to_account: account %s not found in pool", account_id)
-            return False
-        if not acc.cookies:
-            log.error("switch_to_account: account %s has no cookies", account_id)
+        if not acc or not acc.cookies:
+            log.error("switch_to_account: account %s missing or has no cookies", account_id)
             return False
 
         previous = self.account_manager.get_active_account()
         previous_cookies = dict(previous.cookies) if previous else {}
+        previous_proxy = previous.proxy_url if previous else self._proxy_url
+        target_proxy = acc.proxy_url or self._proxy_url
 
-        try:
-            if not self._context or not self._page or not await self.is_alive():
-                log.info("switch_to_account: browser not active, restarting...")
+        # Use strict isolated per-account profile restart whenever switching real Camoufox profiles or proxies
+        target_profile_dir = Path(self.account_manager.resolve_account_dir(acc.id)) / "firefox-profile"
+        cur_profile_acc = getattr(self, "_active_profile_account_id", None)
+        need_isolated_restart = (
+            target_proxy != previous_proxy
+            or (cur_profile_acc is not None and cur_profile_acc != acc.id)
+            or target_profile_dir.exists()
+        )
+        if need_isolated_restart:
+            self.account_manager.set_active_account(acc.id)
+            try:
                 await self.restart()
-        except asyncio.CancelledError:
-            self._ready = False
-            raise
-        except Exception as exc:
-            log.warning("Browser restart failed during account switch (%s)", type(exc).__name__)
-            self._ready = False
+                if self._ready:
+                    self._consecutive_failures = 0
+                    self._last_error_code = 0
+                    self._last_error_category = ""
+                    self._needs_captcha = False
+                    log.info(
+                        "Switched to isolated Camoufox profile for Dola account %s (%s)",
+                        acc.id,
+                        acc.name,
+                    )
+                    return True
+            except asyncio.CancelledError:
+                if previous:
+                    self.account_manager.set_active_account(previous.id)
+                self._ready = False
+                raise
+            except Exception as exc:
+                log.warning("Isolated account switch failed (%s)", type(exc).__name__)
+            if previous:
+                self.account_manager.set_active_account(previous.id)
+                try:
+                    await self.restart()
+                except Exception:
+                    self._ready = False
             return False
 
-        if not self._context or not self._page:
-            return False
-
+        if not await self.is_alive():
+            try:
+                await self.restart()
+            except Exception as exc:
+                log.warning("Camoufox restart failed during account switch (%s)", type(exc).__name__)
+                self._ready = False
+                return False
         async def _restore_previous() -> bool:
-            if not previous_cookies or not self._context or not self._page:
+            if not previous_cookies:
                 return False
             try:
-                await self._context.clear_cookies()
+                await self.clear_cookies()
                 return await self.inject_cookies_and_reload(previous_cookies)
-            except Exception as exc:
-                log.warning("Failed to restore prior account after switch failure (%s)", type(exc).__name__)
+            except Exception:
                 return False
 
-        # Clear existing cookies to avoid session cross-contamination
         self._ready = False
         try:
-            await self._context.clear_cookies()
+            await self.clear_cookies()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -1005,108 +1124,110 @@ class BrowserClient:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            log.warning("Account switch failed during cookie injection (%s)", type(exc).__name__)
+            log.warning("Account switch failed (%s)", type(exc).__name__)
             ok = False
+
         if ok:
             self.account_manager.set_active_account(acc.id)
             self._consecutive_failures = 0
             self._last_error_code = 0
             self._last_error_category = ""
             self._needs_captcha = False
-            log.info("Successfully switched to account %s (%s)", acc.id, acc.name)
+            log.info("Switched Camoufox session to Dola account %s (%s)", acc.id, acc.name)
             return True
 
         restored = await _restore_previous()
         self._ready = restored
         return False
+
     # ------------------------------------------------------------------
-    # Signing & Cookies
+    # Signing, Cookies & Dola Query Params
     # ------------------------------------------------------------------
 
     @_serialized_browser_operation
     async def _get_cookies_string(self) -> str:
-        """Get full cookie string including httpOnly cookies."""
-        cookies = await self._context.cookies("https://www.doubao.com")
-        return "; ".join(f"{c['name']}={c['value']}" for c in cookies)
+        cookies = await self.get_cookies()
+        dola_cookies = [c for c in cookies if "dola.com" in c.get("domain", "")]
+        return "; ".join(f"{c['name']}={c['value']}" for c in dola_cookies if c.get("name"))
 
     @_serialized_browser_operation
     async def _get_csrf_token(self) -> str:
-        """Get passport_csrf_token from browser cookies."""
-        cookies = await self._context.cookies("https://www.doubao.com")
+        cookies = await self.get_cookies()
         for c in cookies:
-            if c["name"] == "passport_csrf_token":
-                return c["value"]
-            if c["name"] == "passport_csrf_token_default":
+            if c["name"] in ("passport_csrf_token", "passport_csrf_token_default") and c.get("value"):
                 return c["value"]
         return ""
 
     @_serialized_browser_operation
     async def _seed_ms_token(self):
-        """Seed initial msToken from browser cookies."""
-        cookies = await self._context.cookies("https://www.doubao.com")
+        cookies = await self.get_cookies()
         for c in cookies:
-            if c["name"] == "msToken":
+            if c["name"] == "msToken" and c.get("value"):
                 self._ms_token = c["value"]
-                log.info("Seeded msToken from cookies (%d chars)", len(c["value"]))
+                log.info("Seeded msToken from Camoufox cookies (%d chars)", len(self._ms_token))
                 return
-        log.warning("No msToken cookie found - first request may trigger rate limit")
 
     @_serialized_browser_operation
     async def _sign_url(self, base_url: str, params: Dict[str, str]) -> str:
-        """Sign a URL using bdms.frontierSign with retry on failure."""
+        """Sign a URL using Dola's in-page `window.bdms.frontierSign`."""
         sorted_params = dict(sorted(params.items()))
         query_string = urlencode(sorted_params)
+
+        if not self._bidi or not self._context_id:
+            raise RuntimeError("Camoufox BiDi not connected")
 
         last_error = None
         for attempt in range(3):
             try:
-                sig = await self._page.evaluate(
-                    f'window.bdms.frontierSign("{query_string}")'
+                sig = await self._bidi.call_function(
+                    self._context_id,
+                    "(qs) => window.bdms && typeof window.bdms.frontierSign === 'function' ? window.bdms.frontierSign(qs) : null",
+                    [_to_bidi_local_value(query_string)],
+                    await_promise=False,
+                    timeout=10.0,
                 )
-
                 if isinstance(sig, dict):
                     if "a_bogus" in sig:
                         return f"{base_url}?{query_string}&a_bogus={sig['a_bogus']}"
-                    elif "X-Bogus" in sig:
+                    if "X-Bogus" in sig:
                         return f"{base_url}?{query_string}&X-Bogus={sig['X-Bogus']}"
-                    elif sig:
+                    if sig:
                         k, v = next(iter(sig.items()))
                         return f"{base_url}?{query_string}&{k}={v}"
                 elif isinstance(sig, str) and sig:
                     return f"{base_url}?{query_string}&X-Bogus={sig}"
-
                 last_error = "empty signature"
-            except Exception as e:
-                last_error = f"signing failed ({type(e).__name__})"
-                log.warning("frontierSign attempt %d failed (%s)", attempt + 1, type(e).__name__)
-
+            except Exception as exc:
+                last_error = f"signing failed ({type(exc).__name__})"
+                log.warning("frontierSign attempt %d failed (%s)", attempt + 1, type(exc).__name__)
             if attempt < 2:
                 await asyncio.sleep(1)
 
-        log.error("frontierSign failed after 3 attempts: %s", last_error)
-        raise RuntimeError(f"Failed to generate X-Bogus signature: {last_error}")
+        raise RuntimeError(f"Failed to generate bdms signature: {last_error}")
 
     def _build_query_params(self) -> Dict[str, str]:
-        """Build the standard query parameters for API calls."""
+        """Build standard Dola International web query parameters."""
+        region = self._region or DOLA_DEFAULT_REGION
+        lang = self._language or DOLA_DEFAULT_LANGUAGE
         params = {
-            "aid": "497858",
+            "aid": str(DOLA_WEB_AID),
+            "real_aid": str(DOLA_WEB_AID),
             "device_id": self._device_id or "",
             "device_platform": "web",
             "doubao_device_platform": "web",
             "web_platform": "browser",
             "fp": self._fp or "",
-            "language": "zh",
-            "pc_version": "3.36.0",
-            "doubao_pc_version": "3.36.0",
+            "language": lang,
+            "pc_version": DOLA_PC_VERSION,
+            "doubao_pc_version": DOLA_PC_VERSION,
             "pkg_type": "release_version",
-            "real_aid": "497858",
-            "region": "CN",
-            "sys_region": "CN",
+            "region": region,
+            "sys_region": region,
             "samantha_web": "1",
             "tea_uuid": self._web_id or "",
-            "tz_name": "Asia/Shanghai",
+            "tz_name": self._tz_name or DOLA_DEFAULT_TIMEZONE,
             "use-olympus-account": "1",
-            "version_code": "20800",
+            "version_code": DOLA_VERSION_CODE,
             "web_id": self._web_id or "",
             "web_tab_id": str(uuid.uuid4()),
         }
@@ -1115,23 +1236,21 @@ class BrowserClient:
         return params
 
     def _build_headers(self, cookie_str: str, csrf_token: str = "") -> Dict[str, str]:
-        """Build request headers."""
-        # Extract CSRF token from cookie string if not provided
+        """Build Dola HTTP headers for out-of-browser TOS/upload calls."""
         if not csrf_token:
             for part in cookie_str.split("; "):
                 if part.startswith("passport_csrf_token="):
                     csrf_token = part.split("=", 1)[1]
                     break
         ua = self._user_agent or (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:152.0) Gecko/20100101 Firefox/152.0"
         )
         headers = {
             "Accept": "*/*",
-            "Accept-Language": "zh-CN,zh;q=0.9",
+            "Accept-Language": "en-US,en;q=0.9",
             "Content-Type": "application/json",
             "Cookie": cookie_str,
-            "Origin": DOUBAO_URL,
+            "Origin": DOLA_URL,
             "Referer": CHAT_URL,
             "User-Agent": ua,
             "agw-js-conv": "str, str",
@@ -1141,7 +1260,7 @@ class BrowserClient:
         return headers
 
     # ------------------------------------------------------------------
-    # Chat Completion (streaming via in-browser fetch)
+    # Chat Completion (Real-time SSE Streaming via WebDriver BiDiChannel)
     # ------------------------------------------------------------------
 
     @_serialized_browser_operation
@@ -1151,31 +1270,26 @@ class BrowserClient:
         conversation_id: Optional[str] = None,
         bot_id: Optional[str] = None,
         use_deep_think: int = 0,
-        image_attachments: Optional[List[Dict[str, Any]]] = None,
         file_attachments: Optional[List[Dict[str, Any]]] = None,
+        image_attachments: Optional[List[Dict[str, Any]]] = None,
+        chat_ability: Optional[Dict[str, Any]] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
-        """Send a chat message and yield SSE events via in-browser fetch."""
-        if not self._page or self._page.is_closed() or not await self.is_alive():
-            log.warning("Browser page is closed or not alive. Auto-recovering browser now...")
-            await self.restart()
+        """Send a chat message on Dola and stream SSE events over a WebDriver BiDiChannel."""
+        if not self._ready or not self._bidi or not self._context_id:
+            raise RuntimeError("Camoufox browser not ready - login to Dola first")
 
-        if not self._ready:
-            raise RuntimeError("Browser not ready - need login first")
-
-        need_create = conversation_id is None or conversation_id == ""
         effective_bot_id = bot_id or DEFAULT_BOT_ID
-        msg_uuid = str(uuid.uuid4())
+        need_create = not bool(conversation_id)
         local_conv_id = f"local_{uuid.uuid4().int % 10**16}"
+        msg_uuid = str(uuid.uuid4())
         now_ms = int(time.time() * 1000)
         now_sec = int(time.time())
 
         content_blocks: List[Dict[str, Any]] = []
 
-        # 1. File attachments (type=3)
         if file_attachments:
-            att_list = []
-            for f in file_attachments:
-                att_list.append({
+            att_list = [
+                {
                     "type": 3,
                     "identifier": str(uuid.uuid4()),
                     "file": {
@@ -1190,66 +1304,77 @@ class BrowserClient:
                     "upload_status": 1,
                     "progress": 100,
                     "src": "",
-                })
-            content_blocks.append({
-                "block_type": 10052,
-                "content": {
-                    "attachment_block": {"attachments": att_list},
-                    "pc_event_block": "",
-                },
-                "block_id": str(uuid.uuid4()),
-                "parent_id": "",
-                "meta_info": [],
-                "append_fields": [],
-            })
-
-        # 2. Image attachments (type=1) with genuine dimensions
-        if image_attachments:
-            for img in image_attachments:
-                content_blocks.append({
+                }
+                for f in file_attachments
+            ]
+            content_blocks.append(
+                {
                     "block_type": 10052,
                     "content": {
-                        "attachment_block": {
-                            "attachments": [{
-                                "type": 1,
-                                "identifier": str(uuid.uuid4()),
-                                "image": {
-                                    "name": img.get("name", "image.png"),
-                                    "uri": img.get("uri", ""),
-                                    "image_ori": {
-                                        "url": img.get("cdn_url", ""),
-                                        "width": int(img.get("width") or 1024),
-                                        "height": int(img.get("height") or 1024),
-                                        "format": img.get("format", "png"),
-                                        "url_formats": {},
-                                    },
-                                },
-                                "parse_state": 0,
-                                "review_state": 0,
-                            }],
-                        },
+                        "attachment_block": {"attachments": att_list},
                         "pc_event_block": "",
                     },
                     "block_id": str(uuid.uuid4()),
                     "parent_id": "",
                     "meta_info": [],
                     "append_fields": [],
-                    "is_finish": True,
-                    "patch_type": 2,
-                })
+                }
+            )
 
-        # 3. Text block (block_type 10000)
-        content_blocks.append({
-            "block_type": 10000,
-            "content": {
-                "text_block": {"text": text, "icon_url": "", "icon_url_dark": "", "summary": ""},
-                "pc_event_block": "",
-            },
-            "block_id": str(uuid.uuid4()),
-            "parent_id": "",
-            "meta_info": [],
-            "append_fields": [],
-        })
+        if image_attachments:
+            for img in image_attachments:
+                content_blocks.append(
+                    {
+                        "block_type": 10052,
+                        "content": {
+                            "attachment_block": {
+                                "attachments": [
+                                    {
+                                        "type": 1,
+                                        "identifier": str(uuid.uuid4()),
+                                        "image": {
+                                            "name": img.get("name", "image.png"),
+                                            "uri": img.get("uri", ""),
+                                            "image_ori": {
+                                                "url": img.get("cdn_url", ""),
+                                                "width": int(img.get("width") or 1024),
+                                                "height": int(img.get("height") or 1024),
+                                                "format": img.get("format", "png"),
+                                                "url_formats": {},
+                                            },
+                                        },
+                                        "parse_state": 1,
+                                        "review_state": 1,
+                                        "upload_status": 1,
+                                        "progress": 100,
+                                        "src": img.get("cdn_url", ""),
+                                    }
+                                ]
+                            },
+                            "pc_event_block": "",
+                        },
+                        "block_id": str(uuid.uuid4()),
+                        "parent_id": "",
+                        "meta_info": [],
+                        "append_fields": [],
+                        "is_finish": True,
+                        "patch_type": 2,
+                    }
+                )
+
+        content_blocks.append(
+            {
+                "block_type": 10000,
+                "content": {
+                    "text_block": {"text": text, "icon_url": "", "icon_url_dark": "", "summary": ""},
+                    "pc_event_block": "",
+                },
+                "block_id": str(uuid.uuid4()),
+                "parent_id": "",
+                "meta_info": [],
+                "append_fields": [],
+            }
+        )
 
         payload = {
             "client_meta": {
@@ -1264,11 +1389,13 @@ class BrowserClient:
                     {"permission_name": "ACCESS_BACKGROUND_LOCATION", "status": 3},
                 ],
             },
-            "messages": [{
-                "local_message_id": msg_uuid,
-                "content_block": content_blocks,
-                "message_status": 0,
-            }],
+            "messages": [
+                {
+                    "local_message_id": msg_uuid,
+                    "content_block": content_blocks,
+                    "message_status": 0,
+                }
+            ],
             "option": {
                 "send_message_scene": "",
                 "create_time_ms": now_ms,
@@ -1342,55 +1469,54 @@ class BrowserClient:
                 "commerce_credit_config_enable": "0",
             },
         }
+        if chat_ability:
+            payload["chat_ability"] = chat_ability
 
-        # Build URL with query params and X-Bogus signature via bdms.frontierSign
         query_params = self._build_query_params()
         url = await self._sign_url("/chat/completion", query_params)
 
         request_id = f"req_{uuid.uuid4().hex[:16]}"
-        queue: asyncio.Queue = asyncio.Queue()
-        self._stream_queues[request_id] = queue
+        channel = self._bidi.open_channel(f"dola_stream_{request_id}")
 
-        log.info("POST %s (conv=%s, deep_think=%s) [browser fetch]",
-                 url.split("?")[0], conversation_id or "new", use_deep_think)
+        log.info(
+            "POST %s (conv=%s, deep_think=%s) [Camoufox BiDiChannel]",
+            url.split("?")[0],
+            conversation_id or "new",
+            use_deep_think,
+        )
 
-        # Launch browser fetch in background with completion watcher
         eval_task = asyncio.create_task(
-            self._browser_fetch_stream(url, payload, request_id)
+            self._browser_fetch_stream(url, payload, request_id, channel.name)
         )
 
         def _on_eval_done(task: asyncio.Task):
             try:
                 exc = task.exception()
                 if exc:
-                    log.error("eval_task crashed for %s (%s)", request_id, type(exc).__name__)
-                    queue.put_nowait(f"__ERROR__:{exc}")
+                    log.error("BiDi stream eval crashed for %s (%s)", request_id, type(exc).__name__)
+                    channel.push({"type": "string", "value": f"__ERROR__:{redact_sensitive_text(str(exc))}"})
             except (asyncio.CancelledError, Exception):
                 pass
 
         eval_task.add_done_callback(_on_eval_done)
 
-        # Yield parsed SSE events from queue
         stream_complete = False
         try:
             while True:
-                chunk_json = await asyncio.wait_for(queue.get(), timeout=180)
-                if chunk_json is None:
-                    # Stream complete
+                chunk_json = await channel.next_text(timeout=180.0)
+                if chunk_json == "__DONE__":
                     stream_complete = True
                     break
                 if chunk_json.startswith("__ERROR__:"):
-                    error_msg = chunk_json[10:]
-                    log.error("Browser fetch failed for request %s", request_id)
-                    yield {"error": True, "status": 0, "body": error_msg}
+                    yield {"error": True, "status": 0, "body": chunk_json[10:]}
                     break
                 if chunk_json.startswith("__HTTP_ERROR__:"):
-                    status = int(chunk_json[15:].split(":", 1)[0])
-                    body = chunk_json[15:].split(":", 1)[1] if ":" in chunk_json[15:] else ""
-                    log.error("Upstream HTTP request failed with status %d", status)
+                    rest = chunk_json[15:]
+                    status = int(rest.split(":", 1)[0])
+                    body = rest.split(":", 1)[1] if ":" in rest else ""
+                    log.error("Dola upstream HTTP error: status=%d", status)
                     yield {"error": True, "status": status, "body": body}
                     break
-                # Parse SSE line
                 try:
                     data = json.loads(chunk_json)
                     yield data
@@ -1400,60 +1526,53 @@ class BrowserClient:
             log.error("Stream timeout (180s) for request %s", request_id)
             yield {"error": True, "status": 0, "body": "Stream timeout"}
         finally:
-            self._stream_queues.pop(request_id, None)
+            channel.close()
             if stream_complete and not eval_task.done():
                 try:
                     await asyncio.wait_for(asyncio.shield(eval_task), timeout=2.0)
                 except (asyncio.TimeoutError, Exception):
                     pass
             if not eval_task.done():
-                if self._page and not self._page.is_closed():
+                if self._bidi and not self._bidi._closed and self._context_id:
                     try:
                         await asyncio.wait_for(
-                            self._page.evaluate(
-                                """requestId => {
-                                    const controllers = window.__doubaoStreamAbortControllers;
-                                    const controller = controllers && controllers.get(requestId);
-                                    if (controller) controller.abort();
+                            self._bidi.call_function(
+                                self._context_id,
+                                """(requestId) => {
+                                    const m = window.__dolaStreamAbortControllers;
+                                    const c = m && m.get(requestId);
+                                    if (c) c.abort();
                                 }""",
-                                request_id,
+                                [_to_bidi_local_value(request_id)],
+                                await_promise=False,
+                                timeout=2.0,
                             ),
-                            timeout=2.0,
+                            timeout=2.5,
                         )
-                    except Exception as exc:
-                        log.debug("Browser stream abort failed (%s)", type(exc).__name__)
+                    except Exception:
+                        pass
                 eval_task.cancel()
                 await asyncio.gather(eval_task, return_exceptions=True)
             else:
-                # Check for exceptions
                 try:
                     eval_task.result()
                 except Exception:
                     pass
 
-    @_serialized_browser_operation
     async def _browser_fetch_stream(
-        self, url: str, payload: Dict[str, Any], request_id: str
+        self, url: str, payload: Dict[str, Any], request_id: str, channel_name: str
     ):
-        """Execute fetch() inside browser page and stream SSE chunks via callback."""
-        js_code = """
-        async ([url, payloadJson, requestId]) => {
-            const controllers = window.__doubaoStreamAbortControllers ||
-                (window.__doubaoStreamAbortControllers = new Map());
+        """Run in-page `fetch()` on Dola and emit parsed SSE chunks over WebDriver BiDi channel."""
+        if not self._bidi or not self._context_id:
+            raise RuntimeError("Camoufox BiDi not connected")
+
+        js_fn = r"""async (url, payloadJson, requestId, sendChunk) => {
+            const controllers = window.__dolaStreamAbortControllers ||
+                (window.__dolaStreamAbortControllers = new Map());
             const controller = new AbortController();
             controllers.set(requestId, controller);
             let reader = null;
-            const sendChunk = async (chunk) => {
-                if (typeof window.__doubaoStreamChunk === 'function') {
-                    try {
-                        await window.__doubaoStreamChunk(requestId, chunk);
-                    } catch(e) {}
-                }
-            };
             try {
-                if (typeof window.__doubaoStreamChunk !== 'function') {
-                    throw new Error('window.__doubaoStreamChunk bridge not registered on page');
-                }
                 const csrf = document.cookie.match(/passport_csrf_token=([^;]+)/);
                 const csrfToken = csrf ? csrf[1] : '';
                 const headers = {
@@ -1472,7 +1591,7 @@ class BrowserClient:
                 });
                 if (!res.ok) {
                     const errBody = await res.text();
-                    await sendChunk('__HTTP_ERROR__:' + res.status + ':' + errBody.slice(0, 500));
+                    sendChunk('__HTTP_ERROR__:' + res.status + ':' + errBody.slice(0, 500));
                     return;
                 }
                 reader = res.body.getReader();
@@ -1480,10 +1599,10 @@ class BrowserClient:
                 let currentEvent = '';
                 let buffer = '';
                 while (true) {
-                    const {done, value} = await reader.read();
+                    const { done, value } = await reader.read();
                     if (done) break;
-                    buffer += decoder.decode(value, {stream: true});
-                    const lines = buffer.split('\\n');
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n');
                     buffer = lines.pop();
                     for (const line of lines) {
                         const trimmed = line.trim();
@@ -1499,44 +1618,41 @@ class BrowserClient:
                         try {
                             const obj = JSON.parse(dataStr);
                             obj._event = currentEvent;
-                            await sendChunk(JSON.stringify(obj));
-                        } catch(e) {}
+                            sendChunk(JSON.stringify(obj));
+                        } catch (e) {}
                     }
                 }
-                // Process remaining buffer
-                if (buffer.trim()) {
-                    const trimmed = buffer.trim();
-                    if (trimmed.startsWith('data: ')) {
-                        const dataStr = trimmed.slice(6);
-                        if (dataStr && dataStr !== '{}') {
-                            try {
-                                const obj = JSON.parse(dataStr);
-                                obj._event = currentEvent;
-                                await sendChunk(JSON.stringify(obj));
-                            } catch(e) {}
-                        }
-                    }
-                }
-                // Signal completion
-                await sendChunk(null);
-            } catch(e) {
-                if (e.name !== 'AbortError') {
-                    await sendChunk('__ERROR__:' + e.message);
-                    throw e;
+                sendChunk('__DONE__');
+            } catch (e) {
+                if (e && e.name === 'AbortError') {
+                    sendChunk('__DONE__');
+                } else {
+                    sendChunk('__ERROR__:' + (e && e.message ? e.message : String(e)));
                 }
             } finally {
                 if (reader) {
-                    try { await reader.cancel(); } catch(e) {}
+                    try { await reader.cancel(); } catch (e) {}
                 }
                 controllers.delete(requestId);
             }
-        }
-        """
+        }"""
+
         payload_json = json.dumps(payload, ensure_ascii=False)
-        await self._page.evaluate(js_code, [url, payload_json, request_id])
+        await self._bidi.call_function(
+            self._context_id,
+            js_fn,
+            [
+                _to_bidi_local_value(url),
+                _to_bidi_local_value(payload_json),
+                _to_bidi_local_value(request_id),
+                {"type": "channel", "value": {"channel": channel_name}},
+            ],
+            await_promise=True,
+            timeout=200.0,
+        )
 
     # ------------------------------------------------------------------
-    # High-level chat helper
+    # High-level Chat Helper & SSE Parsing
     # ------------------------------------------------------------------
 
     @_serialized_browser_operation
@@ -1550,43 +1666,33 @@ class BrowserClient:
         """Send message, collect full response. Returns {text, conversation_id}."""
         full_text = ""
         result_conv_id = conversation_id
-        events = []
-
         async for event in self.chat_completion(
-            text, conversation_id=conversation_id,
-            bot_id=bot_id, use_deep_think=use_deep_think
+            text,
+            conversation_id=conversation_id,
+            bot_id=bot_id,
+            use_deep_think=use_deep_think,
         ):
-            events.append(event)
             if event.get("error"):
                 raise RuntimeError(
-                    f"API error {event.get('status')}: {event.get('body', '')[:200]}"
+                    f"API error {event.get('status')}: {redact_sensitive_text(str(event.get('body', ''))[:200])}"
                 )
             if not result_conv_id:
                 cid = self.extract_conversation_id(event)
                 if cid and cid != "0":
                     result_conv_id = cid
             full_text += self._extract_text(event)
-
         return {"text": full_text, "conversation_id": result_conv_id}
-
-    # ------------------------------------------------------------------
-    # SSE parsing helpers
-    # ------------------------------------------------------------------
 
     @staticmethod
     def _extract_text(event: Dict[str, Any]) -> str:
-        """Extract text content from a SSE event."""
         event_type = event.get("_event", "")
-
         if event_type == "CHUNK_DELTA" and "text" in event:
             return event["text"]
-
         if "patch_op" in event:
             for op in event["patch_op"]:
                 pv = op.get("patch_value", {})
                 for block in pv.get("content_block", []):
-                    content = block.get("content", {})
-                    tb = content.get("text_block", {})
+                    tb = block.get("content", {}).get("text_block", {})
                     if tb.get("text"):
                         return tb["text"]
                 if op.get("patch_object") == 102:
@@ -1598,7 +1704,6 @@ class BrowserClient:
                                 return parsed["text"]
                         except (json.JSONDecodeError, TypeError):
                             pass
-
         if event_type == "STREAM_MSG_NOTIFY":
             content = event.get("content", {})
             if isinstance(content, dict):
@@ -1606,12 +1711,10 @@ class BrowserClient:
                     tb = block.get("content", {}).get("text_block", {})
                     if tb.get("text"):
                         return tb["text"]
-
         return ""
 
     @staticmethod
     def extract_conversation_id(event: Dict[str, Any]) -> Optional[str]:
-        """Extract conversation_id from SSE events."""
         ack = event.get("ack_client_meta", {})
         if ack.get("conversation_id"):
             return ack["conversation_id"]
@@ -1622,16 +1725,10 @@ class BrowserClient:
 
     @_serialized_browser_operation
     async def delete_conversation(self, conversation_id: str) -> bool:
-        """Delete a conversation from Doubao via /im/conversation/batch_del_user_conv.
-
-        Keeps the web UI sidebar completely clean (即用即焚 / Ephemeral Conversations).
-        Returns True if deletion succeeded, False otherwise.
-        """
+        """Delete an ephemeral conversation on Dola via `/im/conversation/batch_del_user_conv`."""
         if not conversation_id or str(conversation_id).strip() in ("0", ""):
             return False
-
-        if not self._ready or self._page is None:
-            log.warning("Cannot delete conversation %s: browser not ready", conversation_id)
+        if not self._ready or not self._bidi or not self._context_id:
             return False
 
         query_params = self._build_query_params()
@@ -1656,111 +1753,101 @@ class BrowserClient:
         }
 
         try:
-            res = await self._page.evaluate('''async (args) => {
-                const [url, payload] = args;
-                const csrfMatch = document.cookie.match(/passport_csrf_token=([^;]+)/);
-                const csrf = csrfMatch ? csrfMatch[1] : "";
-                try {
-                    const resp = await fetch(url, {
-                        method: "POST",
-                        headers: {
-                            "Content-Type": "application/json; encoding=utf-8",
-                            "x-tt-passport-csrf-token": csrf,
-                            "agw-js-conv": "str",
-                        },
-                        body: JSON.stringify(payload),
-                    });
-                    const text = await resp.text();
-                    return { status: resp.status, body: text };
-                } catch(e) {
-                    return { error: e.message };
-                }
-            }''', [signed_url, payload])
-
+            res = await self._bidi.call_function(
+                self._context_id,
+                """async (url, payloadJson) => {
+                    const csrfMatch = document.cookie.match(/passport_csrf_token=([^;]+)/);
+                    const csrf = csrfMatch ? csrfMatch[1] : "";
+                    try {
+                        const resp = await fetch(url, {
+                            method: "POST",
+                            headers: {
+                                "Content-Type": "application/json; encoding=utf-8",
+                                "x-tt-passport-csrf-token": csrf,
+                                "agw-js-conv": "str",
+                            },
+                            body: payloadJson,
+                            credentials: "include",
+                        });
+                        return { status: resp.status, body: await resp.text() };
+                    } catch (e) {
+                        return { error: e.message };
+                    }
+                }""",
+                [_to_bidi_local_value(signed_url), _to_bidi_local_value(json.dumps(payload))],
+                await_promise=True,
+                timeout=20.0,
+            ) or {}
             if res.get("error"):
-                log.warning("delete_conversation %s failed: %s", conversation_id, res["error"])
                 return False
-
             data = json.loads(res.get("body", "{}"))
             if data.get("status_code") == 0:
-                log.info("Successfully deleted ephemeral conversation %s (即用即焚)", conversation_id)
+                log.info("Deleted ephemeral Dola conversation %s", conversation_id)
                 return True
-            else:
-                log.warning("delete_conversation %s: status_code=%s desc=%s",
-                            conversation_id, data.get("status_code"), data.get("status_desc"))
-                return False
+            return False
         except Exception as exc:
             log.warning("delete_conversation %s exception: %s", conversation_id, exc)
             return False
 
     # ------------------------------------------------------------------
-    # Samantha endpoint (image/video/music generation)
+    # Samantha Endpoint (Image / Video / Music Generation)
     # ------------------------------------------------------------------
 
     @_serialized_browser_operation
-    async def _samantha_request(
-        self,
-        payload: Dict[str, Any],
-        timeout: float = 120,
-    ) -> str:
-        """Send a request to /samantha/chat/completion via in-browser fetch."""
-        if not self._ready:
-            raise RuntimeError("Browser not ready - need login first")
+    async def _samantha_request(self, payload: Dict[str, Any], timeout: float = 120) -> str:
+        """Send a request to Dola `/samantha/chat/completion` via in-browser `fetch()`."""
+        if not self._ready or not self._bidi or not self._context_id:
+            raise RuntimeError("Camoufox browser not ready - login to Dola first")
 
         query_params = self._build_query_params()
-        query_string = "&".join(f"{k}={v}" for k, v in sorted(query_params.items()))
-        url = f"/samantha/chat/completion?{query_string}"
-
-        js_code = """
-        async ([url, payloadJson, timeoutMs]) => {
-            const csrf = document.cookie.match(/passport_csrf_token=([^;]+)/);
-            const csrfToken = csrf ? csrf[1] : '';
-            const headers = {
-                'Content-Type': 'application/json',
-                'agw-js-conv': 'str',
-            };
-            if (csrfToken) {
-                headers['x-tt-passport-csrf-token'] = csrfToken;
-            }
-            const controller = new AbortController();
-            const timer = setTimeout(() => controller.abort(), timeoutMs);
-            try {
-                const res = await fetch(url, {
-                    method: 'POST',
-                    headers: headers,
-                    body: payloadJson,
-                    credentials: 'include',
-                    signal: controller.signal,
-                });
-                clearTimeout(timer);
-                if (!res.ok) {
-                    const errBody = await res.text();
-                    return {error: true, status: res.status, body: errBody.slice(0, 500)};
-                }
-                const body = await res.text();
-                return {error: false, body: body};
-            } catch(e) {
-                clearTimeout(timer);
-                return {error: true, status: 0, body: e.message};
-            }
-        }
-        """
+        url = await self._sign_url("/samantha/chat/completion", query_params)
         payload_json = json.dumps(payload, ensure_ascii=False)
         timeout_ms = int(timeout * 1000)
 
-        log.info("POST %s [browser fetch, timeout=%ds]", url.split("?")[0], timeout)
-        result = await self._page.evaluate(
-            js_code, [url, payload_json, timeout_ms]
-        )
+        log.info("POST %s [Camoufox fetch, timeout=%ds]", url.split("?")[0], timeout)
+        result = await self._bidi.call_function(
+            self._context_id,
+            """async (url, payloadJson, timeoutMs) => {
+                const csrf = document.cookie.match(/passport_csrf_token=([^;]+)/);
+                const csrfToken = csrf ? csrf[1] : '';
+                const headers = { 'Content-Type': 'application/json', 'agw-js-conv': 'str' };
+                if (csrfToken) headers['x-tt-passport-csrf-token'] = csrfToken;
+                const controller = new AbortController();
+                const timer = setTimeout(() => controller.abort(), timeoutMs);
+                try {
+                    const res = await fetch(url, {
+                        method: 'POST',
+                        headers: headers,
+                        body: payloadJson,
+                        credentials: 'include',
+                        signal: controller.signal,
+                    });
+                    clearTimeout(timer);
+                    if (!res.ok) {
+                        return { error: true, status: res.status, body: (await res.text()).slice(0, 500) };
+                    }
+                    return { error: false, body: await res.text() };
+                } catch (e) {
+                    clearTimeout(timer);
+                    return { error: true, status: 0, body: e.message };
+                }
+            }""",
+            [
+                _to_bidi_local_value(url),
+                _to_bidi_local_value(payload_json),
+                _to_bidi_local_value(timeout_ms),
+            ],
+            await_promise=True,
+            timeout=timeout + 15.0,
+        ) or {"error": True, "status": 0, "body": "empty BiDi response"}
 
         if result.get("error"):
-            status = result.get("status", 0)
-            body = result.get("body", "")
             raise RuntimeError(
-                f"samantha/chat/completion failed ({status}): {body[:500]}"
+                f"samantha/chat/completion failed ({result.get('status', 0)}): "
+                f"{redact_sensitive_text(str(result.get('body', ''))[:500])}"
             )
 
-        body = result.get("body", "")
+        body = str(result.get("body") or "")
         if body.lstrip().startswith("{"):
             try:
                 err = json.loads(body)
@@ -1775,7 +1862,6 @@ class BrowserClient:
 
     @staticmethod
     def _parse_samantha_sse(raw: str) -> List[Dict[str, Any]]:
-        """Parse samantha SSE body into list of event dicts."""
         events = []
         for block in raw.split("\n\n"):
             if not block.strip():
@@ -1792,6 +1878,56 @@ class BrowserClient:
                 continue
         return events
 
+    @staticmethod
+    def _extract_images_from_event(event: Any) -> List[Dict[str, Any]]:
+        """Recursively extract generated image descriptors from Dola `/chat/completion` SSE events."""
+        found: List[Dict[str, Any]] = []
+        seen_urls: set = set()
+
+        def _walk(node: Any) -> None:
+            if isinstance(node, list):
+                for item in node:
+                    _walk(item)
+                return
+            if isinstance(node, str):
+                if node.startswith("{") or node.startswith("["):
+                    try:
+                        _walk(json.loads(node))
+                    except Exception:
+                        pass
+                return
+            if not isinstance(node, dict):
+                return
+
+            ori = node.get("image_ori")
+            raw_img = node.get("image_raw")
+            preview = node.get("image_preview") or node.get("image_thumb")
+            if isinstance(ori, dict) or isinstance(raw_img, dict):
+                ori_d = ori if isinstance(ori, dict) else {}
+                raw_d = raw_img if isinstance(raw_img, dict) else {}
+                prev_d = preview if isinstance(preview, dict) else {}
+                url = str(ori_d.get("url") or raw_d.get("url") or prev_d.get("url") or "").strip()
+                if url and url.startswith("http") and url not in seen_urls:
+                    seen_urls.add(url)
+                    found.append(
+                        {
+                            "key": str(node.get("key") or node.get("uri") or ""),
+                            "url": url,
+                            "raw_url": str(raw_d.get("url") or url),
+                            "preview_url": str(prev_d.get("url") or ""),
+                            "width": int(ori_d.get("width") or raw_d.get("width") or 0),
+                            "height": int(ori_d.get("height") or raw_d.get("height") or 0),
+                            "format": str(ori_d.get("format") or raw_d.get("format") or "png"),
+                        }
+                    )
+                return
+
+            for val in node.values():
+                _walk(val)
+
+        _walk(event)
+        return found
+
     @_serialized_browser_operation
     async def generate_image(
         self,
@@ -1801,38 +1937,13 @@ class BrowserClient:
         ref_image_keys: Optional[List[str]] = None,
         memory_type: Optional[int] = None,
         save_history: Optional[bool] = None,
+        model: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Generate images using /samantha/chat/completion.
+        """Generate or edit images on Dola via `/chat/completion` using native `chat_ability` (Seedream 4.5 / 5.0 Pro)."""
+        dola_model = resolve_dola_image_model(model)
+        eff_ratio = (ratio or "auto").strip()
 
-        Args:
-            prompt: Text description of the image to generate.
-            ratio: Aspect ratio ("1:1", "16:9", "9:16", "4:3", "3:4").
-            ref_image_key: Optional uploaded image key for reference (single image).
-            ref_image_keys: Optional list of uploaded image keys for reference (multi-image).
-            memory_type: Optional 0 (save to web history) or 2 (ephemeral).
-            save_history: If True, sets memory_type=0.
-
-        Returns:
-            Dict with 'images' list, each having url/width/height/key.
-        """
-        content_data: Dict[str, Any] = {"text": prompt}
-        if ratio:
-            content_data["ratio"] = ratio
-
-        message: Dict[str, Any] = {
-            "content": json.dumps(content_data, ensure_ascii=False),
-            "content_type": 2009,
-            "attachments": [],
-            "references": [],
-            "skill": {
-                "skill_type": 3,
-                "skill_type_no_default": 3,
-                "skill_id": "3",
-                "skill_id_no_default": "3",
-            },
-        }
-
-        keys = []
+        keys: List[str] = []
         if ref_image_keys:
             if isinstance(ref_image_keys, str):
                 keys.append(ref_image_keys)
@@ -1841,91 +1952,91 @@ class BrowserClient:
         if ref_image_key and ref_image_key not in keys:
             keys.insert(0, ref_image_key)
 
-        if keys:
-            message["attachments"] = [
-                {"type": "image", "key": k, "extra": {"refer_types": "overall"}}
-                for k in keys
-            ]
+        image_attachments: List[Dict[str, Any]] = []
+        for k in keys:
+            cdn_url = ""
+            try:
+                if self._http is not None:
+                    file_url = await self._sign_url(f"{DOLA_URL}/alice/message/get_file_url", self._build_query_params())
+                    headers = self._build_headers(await self._get_cookies_string())
+                    resp = await self._http.post(
+                        file_url,
+                        headers=headers,
+                        json={"uris": [k], "type": "image", "format": "png", "expire_second": 3600},
+                        timeout=20,
+                    )
+                    if resp.status_code == 200:
+                        furls = resp.json().get("data", {}).get("file_urls", [])
+                        if furls:
+                            cdn_url = furls[0].get("main_url") or furls[0].get("url", "")
+            except Exception:
+                pass
+            image_attachments.append(
+                {
+                    "uri": k,
+                    "cdn_url": cdn_url,
+                    "name": "ref_image.png",
+                    "format": "png",
+                    "width": 1024,
+                    "height": 1024,
+                }
+            )
+
+        clean_prompt = prompt.strip()
+        full_prompt = f"生成图片：{clean_prompt}"
+        if ratio:
+            full_prompt = f"{full_prompt} ({eff_ratio})"
+
+        ability_param = json.dumps(
+            {
+                "ability_param": {
+                    "model": dola_model,
+                    "ratio": eff_ratio,
+                    "input_box_content": {
+                        "user_input_content": clean_prompt,
+                        "reply_message_format": "生成图片：%s",
+                    },
+                },
+                "ability_type": 1,
+            },
+            ensure_ascii=False,
+        )
+        chat_ability = {"ability_type": 3, "ability_param": ability_param}
 
         eff_mem_type = resolve_memory_type(memory_type, save_history)
-        payload = {
-            "messages": [message],
-            "completion_option": {
-                "is_regen": False,
-                "with_suggest": True,
-                "need_create_conversation": True,
-                "launch_stage": 1,
-                "is_replace": False,
-                "is_delete": False,
-                "is_ai_playground": False,
-                "memory_type": eff_mem_type,
-                "message_from": 0,
-                "use_deep_think": False,
-                "use_auto_cot": False,
-                "resend_for_regen": False,
-                "enable_commerce_credit": False,
-                "action_bar_skill_id": 3,
-            },
-            "evaluate_option": {"web_ab_params": ""},
-            "local_conversation_id": str(uuid.uuid4()),
-            "local_message_id": str(uuid.uuid4()),
-        }
+        images: List[Dict[str, Any]] = []
+        seen_urls: set = set()
+        conv_id: Optional[str] = None
+        input_uris = set(keys)
+        input_urls = {a["cdn_url"] for a in image_attachments if a.get("cdn_url")}
 
-        log.info("generate_image: prompt=%s, ratio=%s", prompt[:50], ratio)
-        raw = await self._samantha_request(payload, timeout=120)
-
-        # Parse response - look for content_type=2010 (image output)
-        images = []
-        for data in self._parse_samantha_sse(raw):
-            et = data.get("event_type")
-            if et == 2005:
-                detail = data.get("event_data", "")
-                raise RuntimeError(f"generate_image error: {str(detail)[:500]}")
-            if et != 2001:
-                continue
-
-            ed = data.get("event_data", {})
-            if isinstance(ed, str):
-                try:
-                    ed = json.loads(ed)
-                except json.JSONDecodeError:
+        async for event in self.chat_completion(
+            text=full_prompt,
+            image_attachments=image_attachments or None,
+            use_deep_think=0,
+            chat_ability=chat_ability,
+        ):
+            if event.get("error"):
+                raise RuntimeError(
+                    f"generate_image error ({event.get('status', 0)}): {str(event.get('body', ''))[:500]}"
+                )
+            cid = self.extract_conversation_id(event)
+            if cid:
+                conv_id = cid
+            for img in self._extract_images_from_event(event):
+                if img.get("key") in input_uris or img.get("url") in input_urls:
                     continue
+                if img["url"] not in seen_urls:
+                    seen_urls.add(img["url"])
+                    images.append(img)
 
-            msg = ed.get("message", {})
-            if isinstance(msg, str):
-                try:
-                    msg = json.loads(msg)
-                except json.JSONDecodeError:
-                    continue
+        if conv_id and eff_mem_type == 2:
+            try:
+                await self.delete_conversation(conv_id)
+            except Exception:
+                pass
 
-            if msg.get("content_type") != 2010:
-                continue
-
-            content_raw = msg.get("content", "")
-            if isinstance(content_raw, str):
-                try:
-                    content = json.loads(content_raw)
-                except json.JSONDecodeError:
-                    continue
-            else:
-                content = content_raw
-
-            for item in content.get("data", []):
-                if not isinstance(item, dict):
-                    continue
-                ori = item.get("image_ori", {}) or {}
-                raw_img = item.get("image_raw", {}) or {}
-                thumb = item.get("image_thumb", {}) or {}
-                images.append({
-                    "key": item.get("key", ""),
-                    "url": ori.get("url") or raw_img.get("url") or thumb.get("url", ""),
-                    "width": ori.get("width") or thumb.get("width", 0),
-                    "height": ori.get("height") or thumb.get("height", 0),
-                    "format": ori.get("format") or thumb.get("format", ""),
-                })
-
-        log.info("generate_image: got %d images", len(images))
-        return {"images": images, "prompt": prompt}
+        return {"images": images, "prompt": prompt, "model": dola_model}
 
     @_serialized_browser_operation
     async def generate_music(
@@ -1936,20 +2047,7 @@ class BrowserClient:
         memory_type: Optional[int] = None,
         save_history: Optional[bool] = None,
     ) -> Dict[str, Any]:
-        """Generate music using /samantha/chat/completion.
-
-        Args:
-            prompt: Text description of the music to generate.
-            lyric: Explicit lyrics (optional).
-            genre: Music genre (optional).
-            memory_type: Optional 0 (save to web history) or 2 (ephemeral).
-            save_history: If True, sets memory_type=0.
-
-        Returns:
-            Dict with 'tracks' list, each having audio_url/title/lyrics/duration.
-        """
-        import base64
-
+        """Generate music via Dola `/samantha/chat/completion`."""
         content_data: Dict[str, Any] = {"text": prompt}
         if lyric:
             content_data["lyric"] = lyric
@@ -1968,7 +2066,6 @@ class BrowserClient:
                 "skill_id_no_default": "9",
             },
         }
-
         eff_mem_type = resolve_memory_type(memory_type, save_history)
         payload = {
             "messages": [message],
@@ -1993,66 +2090,40 @@ class BrowserClient:
             "local_message_id": str(uuid.uuid4()),
         }
 
-        log.info("generate_music: prompt=%s", prompt[:50])
         raw = await self._samantha_request(payload, timeout=300)
-
-        # Parse: find last content_type=2006 with video_model
-        tracks = []
         final_content = None
         for data in self._parse_samantha_sse(raw):
             et = data.get("event_type")
             if et == 2005:
-                detail = data.get("event_data", "")
-                raise RuntimeError(f"generate_music error: {str(detail)[:500]}")
+                raise RuntimeError(f"generate_music error: {str(data.get('event_data', ''))[:500]}")
             if et != 2001:
                 continue
-
             ed = data.get("event_data", {})
             if isinstance(ed, str):
                 try:
                     ed = json.loads(ed)
                 except json.JSONDecodeError:
                     continue
-
             msg = ed.get("message", {})
             if isinstance(msg, str):
                 try:
                     msg = json.loads(msg)
                 except json.JSONDecodeError:
                     continue
-
             if msg.get("content_type") not in (2006, 2004):
                 continue
-
             content_raw = msg.get("content", "")
-            if isinstance(content_raw, str):
-                try:
-                    content = json.loads(content_raw)
-                except json.JSONDecodeError:
-                    continue
-            else:
-                content = content_raw
-
-            # Keep updating - we want the final (most complete) version
-            final_content = content
+            final_content = json.loads(content_raw) if isinstance(content_raw, str) else content_raw
 
         if not final_content:
-            log.warning("generate_music: no content_type=2006 found")
             return {"tracks": [], "prompt": prompt}
 
-        # Parse tasks
         tasks = final_content.get("tasks", {})
-        if isinstance(tasks, dict):
-            tasks_list = list(tasks.values())
-        elif isinstance(tasks, list):
-            tasks_list = tasks
-        else:
-            tasks_list = []
-
+        tasks_list = list(tasks.values()) if isinstance(tasks, dict) else (tasks if isinstance(tasks, list) else [])
+        tracks = []
         for task in tasks_list:
             if not isinstance(task, dict):
                 continue
-
             audio_url = ""
             duration = 0.0
             vm_str = task.get("video_model", "")
@@ -2060,34 +2131,103 @@ class BrowserClient:
                 try:
                     vm = json.loads(vm_str) if isinstance(vm_str, str) else vm_str
                     duration = vm.get("video_duration", 0.0)
-                    vlist = vm.get("video_list", {})
-                    for _q, vinfo in vlist.items():
-                        main_url_b64 = vinfo.get("main_url", "")
-                        if main_url_b64:
-                            audio_url = base64.b64decode(main_url_b64).decode(
-                                "utf-8", errors="replace"
+                    for _q, vinfo in (vm.get("video_list") or {}).items():
+                        b64_url = vinfo.get("main_url", "")
+                        if b64_url:
+                            audio_url = base64.b64decode(b64_url).decode("utf-8", errors="replace")
+                            break
+                except Exception:
+                    pass
+            cover = task.get("cover", {})
+            cover_url = (cover.get("image_ori") or {}).get("url", "") if isinstance(cover, dict) else ""
+            if audio_url or task.get("title"):
+                tracks.append(
+                    {
+                        "audio_url": audio_url,
+                        "title": task.get("title", ""),
+                        "lyrics": task.get("lyric", ""),
+                        "duration": duration,
+                        "cover_url": cover_url,
+                    }
+                )
+        return {"tracks": tracks, "prompt": prompt}
+
+    @staticmethod
+    def _extract_videos_from_event(event: Any) -> List[Dict[str, Any]]:
+        """Recursively extract generated video descriptors from Dola `/chat/completion` SSE events."""
+        found: List[Dict[str, Any]] = []
+        seen_urls: set = set()
+
+        def _walk(node: Any) -> None:
+            if isinstance(node, list):
+                for item in node:
+                    _walk(item)
+                return
+            if isinstance(node, str):
+                if node.startswith("{") or node.startswith("["):
+                    try:
+                        _walk(json.loads(node))
+                    except Exception:
+                        pass
+                return
+            if not isinstance(node, dict):
+                return
+
+            video_url = ""
+            for k in ("video_url", "play_url", "download_url"):
+                v = node.get(k)
+                if isinstance(v, str) and v.startswith("http"):
+                    video_url = v
+                    break
+            if not video_url and node.get("video_model"):
+                try:
+                    vm = (
+                        json.loads(node["video_model"])
+                        if isinstance(node["video_model"], str)
+                        else node["video_model"]
+                    )
+                    for _q, vinfo in (vm.get("video_list") or {}).items():
+                        if isinstance(vinfo, dict) and vinfo.get("main_url"):
+                            raw_u = str(vinfo["main_url"])
+                            video_url = (
+                                raw_u
+                                if raw_u.startswith("http")
+                                else base64.b64decode(raw_u).decode("utf-8", errors="replace")
                             )
                             break
-                except (json.JSONDecodeError, Exception):
+                except Exception:
                     pass
+            if not video_url and isinstance(node.get("video"), dict):
+                vobj = node["video"]
+                for k in ("video_url", "play_url", "url", "main_url"):
+                    val = vobj.get(k)
+                    if isinstance(val, str) and val.startswith("http"):
+                        video_url = val
+                        break
+            if video_url and video_url not in seen_urls:
+                seen_urls.add(video_url)
+                cover_url = str(
+                    node.get("cover_url")
+                    or (node.get("cover") or {}).get("url")
+                    or (node.get("poster") or {}).get("url")
+                    or ""
+                )
+                found.append(
+                    {
+                        "video_url": video_url,
+                        "cover_url": cover_url,
+                        "width": int(node.get("width") or 0),
+                        "height": int(node.get("height") or 0),
+                        "duration": float(node.get("duration") or 0.0),
+                    }
+                )
+                return
 
-            cover_url = ""
-            cover = task.get("cover", {})
-            if isinstance(cover, dict):
-                cover_ori = cover.get("image_ori", {}) or {}
-                cover_url = cover_ori.get("url", "")
+            for val in node.values():
+                _walk(val)
 
-            if audio_url or task.get("title"):
-                tracks.append({
-                    "audio_url": audio_url,
-                    "title": task.get("title", ""),
-                    "lyrics": task.get("lyric", ""),
-                    "duration": duration,
-                    "cover_url": cover_url,
-                })
-
-        log.info("generate_music: got %d tracks", len(tracks))
-        return {"tracks": tracks, "prompt": prompt}
+        _walk(event)
+        return found
 
     @_serialized_browser_operation
     async def generate_video(
@@ -2098,28 +2238,17 @@ class BrowserClient:
         ref_image_keys: Optional[List[str]] = None,
         memory_type: Optional[int] = None,
         save_history: Optional[bool] = None,
+        model: Optional[str] = None,
+        duration: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """Generate video using /samantha/chat/completion (async 2-step).
+        """Generate video on Dola via `/chat/completion` using native Seedance `chat_ability` (`ability_type=17`)."""
+        dola_model = resolve_dola_video_model(model)
+        eff_ratio = (ratio or "auto").strip()
+        eff_duration = int(duration or 10)
+        if eff_duration not in (5, 10):
+            eff_duration = 10 if eff_duration >= 8 else 5
 
-        Args:
-            prompt: Text description of the video to generate.
-            ratio: Aspect ratio ("16:9", "9:16", "1:1").
-            ref_image_key: Optional image key for image-to-video (single image).
-            ref_image_keys: Optional list of image keys for multi-image reference.
-            memory_type: Optional 0 (save to web history) or 2 (ephemeral).
-            save_history: If True, sets memory_type=0.
-
-        Returns:
-            Dict with 'videos' list, each having video_url/cover_url/duration.
-        """
-        import base64
-
-        content_data: Dict[str, Any] = {"text": prompt}
-        if ratio:
-            content_data["ratio"] = ratio
-
-        # Support both single and multiple reference images
-        keys = []
+        keys: List[str] = []
         if ref_image_keys:
             if isinstance(ref_image_keys, str):
                 keys.append(ref_image_keys)
@@ -2128,252 +2257,293 @@ class BrowserClient:
         if ref_image_key and ref_image_key not in keys:
             keys.insert(0, ref_image_key)
 
-        attachments = [{"type": "image", "key": k} for k in keys]
+        image_attachments: List[Dict[str, Any]] = []
+        for k in keys:
+            cdn_url = ""
+            try:
+                if self._http is not None:
+                    file_url = await self._sign_url(f"{DOLA_URL}/alice/message/get_file_url", self._build_query_params())
+                    headers = self._build_headers(await self._get_cookies_string())
+                    resp = await self._http.post(
+                        file_url,
+                        headers=headers,
+                        json={"uris": [k], "type": "image", "format": "png", "expire_second": 3600},
+                        timeout=20,
+                    )
+                    if resp.status_code == 200:
+                        furls = resp.json().get("data", {}).get("file_urls", [])
+                        if furls:
+                            cdn_url = furls[0].get("main_url") or furls[0].get("url", "")
+            except Exception:
+                pass
+            image_attachments.append(
+                {
+                    "uri": k,
+                    "cdn_url": cdn_url,
+                    "name": "ref_image.png",
+                    "format": "png",
+                    "width": 1024,
+                    "height": 1024,
+                }
+            )
 
-        message: Dict[str, Any] = {
-            "content": json.dumps(content_data, ensure_ascii=False),
-            "content_type": 2020,
-            "attachments": attachments,
-            "references": [],
-            "skill": {
-                "skill_type": 17,
-                "skill_type_no_default": 17,
-                "skill_id": "17",
-                "skill_id_no_default": "17",
+        clean_prompt = prompt.strip()
+        full_prompt = f"生成视频：{clean_prompt}，{eff_duration}s"
+        ability_param = json.dumps(
+            {
+                "ratio": eff_ratio,
+                "model": dola_model,
+                "duration": eff_duration,
+                "input_box_content": {
+                    "user_input_content": clean_prompt,
+                    "reply_message_format": "生成视频：%s",
+                },
             },
-        }
+            ensure_ascii=False,
+        )
+        chat_ability = {"ability_type": 17, "ability_param": ability_param}
+
+        quota_markers = (
+            "daily limit",
+            "quota exceeded",
+            "limit reached",
+            "out of credits",
+            "upgrade",
+            "subscribe",
+            "今日生成次数已达上限",
+            "次数已达上限",
+            "额度已用尽",
+            "达到今日上限",
+            "次数超限",
+        )
 
         eff_mem_type = resolve_memory_type(memory_type, save_history)
-        payload = {
-            "messages": [message],
-            "completion_option": {
-                "is_regen": False,
-                "with_suggest": True,
-                "need_create_conversation": True,
-                "launch_stage": 1,
-                "is_replace": False,
-                "is_delete": False,
-                "is_ai_playground": False,
-                "memory_type": eff_mem_type,
-                "message_from": 0,
-                "use_deep_think": False,
-                "use_auto_cot": False,
-                "resend_for_regen": False,
-                "enable_commerce_credit": False,
-                "action_bar_skill_id": 17,
-            },
-            "evaluate_option": {"web_ab_params": ""},
-            "local_conversation_id": str(uuid.uuid4()),
-            "local_message_id": str(uuid.uuid4()),
-        }
+        videos: List[Dict[str, Any]] = []
+        seen_urls: set = set()
+        text_parts: List[str] = []
+        conv_id: Optional[str] = None
+        task_id: Optional[str] = None
 
-        log.info("generate_video: prompt=%s, ratio=%s, memory_type=%s, attachments_count=%d", prompt[:50], ratio, eff_mem_type, len(attachments))
-        raw = await self._samantha_request(payload, timeout=60)
+        def _find_task_id(node: Any) -> Optional[str]:
+            if isinstance(node, dict):
+                at = node.get("async_task")
+                if isinstance(at, dict) and at.get("id"):
+                    return str(at["id"])
+                if node.get("task_id") and isinstance(node.get("task_id"), (str, int)):
+                    return str(node["task_id"])
+                for v in node.values():
+                    found = _find_task_id(v)
+                    if found:
+                        return found
+            elif isinstance(node, list):
+                for item in node:
+                    found = _find_task_id(item)
+                    if found:
+                        return found
+            return None
 
-        # Phase 1: Extract async task_id from fin_reason
-        task_id = None
-        text_parts = []
-        for data in self._parse_samantha_sse(raw):
-            et = data.get("event_type")
-            if et == 2005:
-                detail = data.get("event_data", "")
-                is_quota = any(k in str(detail) for k in ("今日生成次数已达上限", "次数已达上限", "额度已用尽", "达到今日上限", "次数超限"))
-                if is_quota and hasattr(self, "account_manager"):
-                    self.account_manager.mark_quota_exceeded(
-                        account_id=self.account_manager.active_account_id,
-                        feature="video",
-                    )
+        async for event in self.chat_completion(
+            text=full_prompt,
+            image_attachments=image_attachments or None,
+            use_deep_think=0,
+            chat_ability=chat_ability,
+        ):
+            if event.get("error"):
+                detail = str(event.get("body", ""))
+                if any(k in detail.lower() for k in quota_markers):
+                    if self.account_manager:
+                        self.account_manager.mark_quota_exceeded(
+                            account_id=self.account_manager.active_account_id,
+                            feature="video",
+                        )
                     raise VideoQuotaExceeded("Video generation quota exceeded for active account")
-                raise RuntimeError(f"generate_video error: {str(detail)[:500]}")
-            if et != 2001:
-                continue
-
-            ed = data.get("event_data", {})
-            if isinstance(ed, str):
-                try:
-                    ed = json.loads(ed)
-                except json.JSONDecodeError:
-                    continue
-
-            # Check for async task
-            fin_reason = ed.get("fin_reason", {})
-            if fin_reason and fin_reason.get("reason") == 1:
-                async_task = fin_reason.get("async_task", {})
-                task_id = async_task.get("id", "")
-
-            # Collect text for error messages
-            msg = ed.get("message", {})
-            if isinstance(msg, str):
-                try:
-                    msg = json.loads(msg)
-                except json.JSONDecodeError:
-                    continue
-            if msg.get("content_type") == 2001:
-                content_raw = msg.get("content", "")
-                if isinstance(content_raw, str):
-                    try:
-                        c = json.loads(content_raw)
-                        text_parts.append(c.get("text", ""))
-                    except json.JSONDecodeError:
-                        pass
+                raise RuntimeError(f"generate_video error ({event.get('status', 0)}): {detail[:500]}")
+            cid = self.extract_conversation_id(event)
+            if cid:
+                conv_id = cid
+            if not task_id:
+                task_id = _find_task_id(event)
+            txt = self._extract_text(event)
+            if txt:
+                text_parts.append(txt)
+            for v in self._extract_videos_from_event(event):
+                if v["video_url"] not in seen_urls:
+                    seen_urls.add(v["video_url"])
+                    videos.append(v)
 
         full_text = "".join(text_parts)
-        is_quota = any(k in full_text for k in ("今日生成次数已达上限", "次数已达上限", "额度已用尽", "达到今日上限", "次数超限"))
-        if is_quota and hasattr(self, "account_manager"):
-            self.account_manager.mark_quota_exceeded(
-                account_id=self.account_manager.active_account_id,
-                feature="video",
-            )
+        if not videos and any(k in full_text.lower() for k in quota_markers):
+            if self.account_manager:
+                self.account_manager.mark_quota_exceeded(
+                    account_id=self.account_manager.active_account_id,
+                    feature="video",
+                )
             raise VideoQuotaExceeded("Video generation quota exceeded for active account")
 
-        if "服务过载" in full_text or "重试" in full_text:
-            raise RuntimeError("视频生成服务过载，请稍后重试")
+        # If Dola queued an async video task (1-3 min), stream `/chat/async/chunk_stream` until completion
+        if not videos and task_id and self._bidi and self._context_id:
+            log.info("Dola Seedance video queued async task_id=%s; streaming async result...", task_id)
+            polled = await self._poll_async_video_stream(task_id, conv_id=conv_id, timeout=240.0)
+            for v in polled:
+                if v["video_url"] not in seen_urls:
+                    seen_urls.add(v["video_url"])
+                    videos.append(v)
 
-        if not task_id:
-            # Maybe sync result with content_type=2021, or just text response
-            if full_text:
-                return {"videos": [], "prompt": prompt, "message": full_text}
-            raise RuntimeError("Video generation: no task_id returned")
+        if conv_id and eff_mem_type == 2 and (videos or not task_id):
+            try:
+                await self.delete_conversation(conv_id)
+            except Exception:
+                pass
 
-        # Phase 2: Poll for result
-        log.info("generate_video: polling task_id=%s", task_id)
-        return await self._poll_video_result(task_id, prompt)
+        return {
+            "videos": videos,
+            "prompt": prompt,
+            "model": dola_model,
+            "task_id": task_id,
+            "conversation_id": conv_id,
+            "message": full_text,
+        }
+
+    async def _poll_async_video_stream(
+        self, task_id: str, *, conv_id: Optional[str] = None, timeout: float = 240.0
+    ) -> List[Dict[str, Any]]:
+        """Stream Dola async video generation progress over signed `/chat/async/chunk_stream`."""
+        if not self._bidi or not self._context_id:
+            return []
+        videos: List[Dict[str, Any]] = []
+        seen: set = set()
+        for endpoint in ("/chat/async/chunk_stream", "/samantha/chat/async/stream"):
+            try:
+                signed_url = await self._sign_url(endpoint, self._build_query_params())
+                req_id = f"vid_{uuid.uuid4().hex[:12]}"
+                channel = self._bidi.open_channel(f"dola_vid_{req_id}")
+                payload: Dict[str, Any] = {"task_id": task_id, "event_id": 0}
+                if conv_id:
+                    payload["conversation_id"] = conv_id
+                eval_task = asyncio.create_task(
+                    self._browser_fetch_stream(signed_url, payload, req_id, channel.name)
+                )
+                try:
+                    while True:
+                        chunk_json = await channel.next_text(timeout=timeout)
+                        if chunk_json == "__DONE__" or chunk_json.startswith(("__ERROR__:", "__HTTP_ERROR__:")):
+                            break
+                        try:
+                            ev = json.loads(chunk_json)
+                        except Exception:
+                            continue
+                        for v in self._extract_videos_from_event(ev):
+                            if v["video_url"] not in seen:
+                                seen.add(v["video_url"])
+                                videos.append(v)
+                finally:
+                    channel.close()
+                    if not eval_task.done():
+                        eval_task.cancel()
+                    await asyncio.gather(eval_task, return_exceptions=True)
+                if videos:
+                    return videos
+            except Exception as exc:
+                log.warning("Async video stream %s failed: %s", endpoint, redact_sensitive_text(str(exc)))
+        return videos
 
     @_serialized_browser_operation
     async def _poll_video_result(
         self, task_id: str, prompt: str, timeout: float = 300
     ) -> Dict[str, Any]:
-        """Poll /samantha/chat/completion with task_id for video result."""
-        import base64
-
-        poll_payload = {"task_id": task_id, "event_id": 0}
-        # Use _samantha_request which now uses browser fetch
-        raw = await self._samantha_request(poll_payload, timeout=timeout)
-
+        raw = await self._samantha_request({"task_id": task_id, "event_id": 0}, timeout=timeout)
         videos = []
         for data in self._parse_samantha_sse(raw):
-            et = data.get("event_type")
-            if et != 2001:
+            if data.get("event_type") != 2001:
                 continue
-
             ed = data.get("event_data", {})
             if isinstance(ed, str):
                 try:
                     ed = json.loads(ed)
                 except json.JSONDecodeError:
                     continue
-
             msg = ed.get("message", {})
             if isinstance(msg, str):
                 try:
                     msg = json.loads(msg)
                 except json.JSONDecodeError:
                     continue
-
             if msg.get("content_type") != 2021:
                 continue
-
             content_raw = msg.get("content", "")
-            if isinstance(content_raw, str):
-                try:
-                    content = json.loads(content_raw)
-                except json.JSONDecodeError:
-                    continue
-            else:
-                content = content_raw
-
+            content = json.loads(content_raw) if isinstance(content_raw, str) else content_raw
             for item in content.get("data", [content]):
                 if not isinstance(item, dict):
                     continue
                 video_url = item.get("video_url", "") or item.get("url", "")
-                if not video_url:
-                    vm_str = item.get("video_model", "")
-                    if vm_str:
-                        try:
-                            vm = json.loads(vm_str) if isinstance(vm_str, str) else vm_str
-                            vlist = vm.get("video_list", {})
-                            for _q, vinfo in vlist.items():
-                                main_b64 = vinfo.get("main_url", "")
-                                if main_b64:
-                                    video_url = base64.b64decode(main_b64).decode(
-                                        "utf-8", errors="replace"
-                                    )
-                                    break
-                        except (json.JSONDecodeError, Exception):
-                            pass
-
-                cover_url = item.get("cover_url", "") or item.get("cover", {}).get("url", "")
+                if not video_url and item.get("video_model"):
+                    try:
+                        vm = json.loads(item["video_model"]) if isinstance(item["video_model"], str) else item["video_model"]
+                        for _q, vinfo in (vm.get("video_list") or {}).items():
+                            if vinfo.get("main_url"):
+                                video_url = base64.b64decode(vinfo["main_url"]).decode("utf-8", errors="replace")
+                                break
+                    except Exception:
+                        pass
+                cover_url = item.get("cover_url", "") or (item.get("cover") or {}).get("url", "")
                 if video_url:
-                    videos.append({
-                        "video_url": video_url,
-                        "cover_url": cover_url,
-                        "width": item.get("width", 0),
-                        "height": item.get("height", 0),
-                        "duration": item.get("duration", 0.0),
-                    })
-
-        log.info("generate_video: got %d videos", len(videos))
+                    videos.append(
+                        {
+                            "video_url": video_url,
+                            "cover_url": cover_url,
+                            "width": item.get("width", 0),
+                            "height": item.get("height", 0),
+                            "duration": item.get("duration", 0.0),
+                        }
+                    )
         return {"videos": videos, "prompt": prompt}
 
     # ------------------------------------------------------------------
-    # File upload (TOS / ImageX flow)
+    # File & Image Upload (Dola ByteDance Overseas TOS / ImageX)
     # ------------------------------------------------------------------
 
     @_serialized_browser_operation
     async def upload_file(
         self,
         file_data: bytes,
-        filename: str,
+        filename: str = "document.txt",
     ) -> Dict[str, Any]:
-        """Upload a file to Doubao's storage (ByteDance TOS via ImageX proxy).
-
-        4-step flow:
-          1. POST /alice/resource/prepare_upload -> STS credentials
-          2. GET  /top/v1?Action=ApplyImageUpload -> upload address
-          3. POST https://{tos_host}/upload/v1/{store_uri} -> upload binary
-          4. POST /top/v1?Action=CommitImageUpload -> confirm
-
-        Returns:
-            Dict with uri, name, size, file_type.
-        """
-        import zlib
-        import hashlib
-        import hmac as hmac_mod
-        from datetime import datetime, timezone
-        from urllib.parse import urlparse, parse_qs, quote as url_quote
-
-        if not self._ready:
-            raise RuntimeError("Browser not ready - need login first")
+        """Upload a file to Dola storage (ByteDance TOS via ImageX proxy)."""
+        if not self._ready or self._http is None:
+            raise RuntimeError("Camoufox browser not ready - login to Dola first")
 
         ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
         file_size = len(file_data)
         crc32 = format(zlib.crc32(file_data) & 0xFFFFFFFF, "08x")
 
         query_params = self._build_query_params()
-        signed_url = await self._sign_url(
-            f"{DOUBAO_URL}/alice/resource/prepare_upload", query_params
-        )
+        signed_url = await self._sign_url(f"{DOLA_URL}/alice/resource/prepare_upload", query_params)
         cookie_str = await self._get_cookies_string()
         headers = self._build_headers(cookie_str)
 
-        # Step 1: prepare_upload
         resp = await self._http.post(
-            signed_url, headers=headers,
+            signed_url,
+            headers=headers,
             json={"tenant_id": "5", "scene_id": "5", "resource_type": 1},
             timeout=30,
         )
         body = resp.json()
         if body.get("code") != 0:
             raise RuntimeError(f"prepare_upload failed: {body.get('msg', body)}")
+
         data = body["data"]
         service_id = data["service_id"]
         auth_token = data["upload_auth_token"]
         ak = auth_token["access_key"]
         sk = auth_token["secret_key"]
         st = auth_token["session_token"]
+        # Use dynamic region from prepare_upload if returned, else overseas Singapore default
+        aws_region = (
+            str(data.get("region") or data.get("upload_region") or auth_token.get("region") or "").strip()
+            or DOLA_IMAGEX_REGION
+        )
 
-        # AWS V4 signing helper
-        def _aws_sign_v4(method, url, req_body):
+        def _aws_sign_v4(method: str, url: str, req_body: Union[str, bytes]) -> Dict[str, str]:
             parsed = urlparse(url)
             host = parsed.hostname or ""
             path = parsed.path or "/"
@@ -2393,30 +2563,33 @@ class BrowserClient:
             body_b = req_body if isinstance(req_body, bytes) else req_body.encode()
             payload_hash = hashlib.sha256(body_b).hexdigest()
             cr = f"{method}\n{path}\n{canonical_qs}\n{canonical_h}\n{signed_h}\n{payload_hash}"
-            scope = f"{date_stamp}/cn-north-1/imagex/aws4_request"
+            scope = f"{date_stamp}/{aws_region}/{DOLA_IMAGEX_SERVICE}/aws4_request"
             cr_hash = hashlib.sha256(cr.encode()).hexdigest()
             sts = f"AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{cr_hash}"
-            def _s(key, msg):
+
+            def _s(key: bytes, msg: str) -> bytes:
                 return hmac_mod.new(key, msg.encode("utf-8"), hashlib.sha256).digest()
+
             k_d = _s(f"AWS4{sk}".encode("utf-8"), date_stamp)
-            k_r = _s(k_d, "cn-north-1")
-            k_sv = _s(k_r, "imagex")
+            k_r = _s(k_d, aws_region)
+            k_sv = _s(k_r, DOLA_IMAGEX_SERVICE)
             k_sg = _s(k_sv, "aws4_request")
             sig = hmac_mod.new(k_sg, sts.encode("utf-8"), hashlib.sha256).hexdigest()
-            auth_str = f"AWS4-HMAC-SHA256 Credential={ak}/{scope}, SignedHeaders={signed_h}, Signature={sig}"
-            result = {"Authorization": auth_str, "x-amz-date": amz_date, "x-amz-content-sha256": payload_hash}
+            result = {
+                "Authorization": f"AWS4-HMAC-SHA256 Credential={ak}/{scope}, SignedHeaders={signed_h}, Signature={sig}",
+                "x-amz-date": amz_date,
+                "x-amz-content-sha256": payload_hash,
+            }
             if st:
                 result["x-amz-security-token"] = st
             return result
 
-        # Step 2: ApplyImageUpload
         file_ext = f".{ext}" if ext else ""
         apply_url = (
-            f"{DOUBAO_URL}/top/v1?"
+            f"{DOLA_URL}/top/v1?"
             f"Action=ApplyImageUpload&Version=2018-08-01"
             f"&ServiceId={service_id}&NeedFallback=true"
-            f"&FileSize={file_size}&FileExtension={file_ext}"
-            f"&s=jdnfglwfkl"
+            f"&FileSize={file_size}&FileExtension={file_ext}&s=jdnfglwfkl"
         )
         sign_h = _aws_sign_v4("GET", apply_url, "")
         sign_h["Cookie"] = cookie_str
@@ -2424,6 +2597,7 @@ class BrowserClient:
         result_data = resp.json().get("Result")
         if not result_data:
             raise RuntimeError(f"ApplyImageUpload failed: {resp.json()}")
+
         upload_addr = result_data["UploadAddress"]
         store_info = upload_addr["StoreInfos"][0]
         store_uri = store_info["StoreUri"]
@@ -2431,11 +2605,11 @@ class BrowserClient:
         session_key = upload_addr["SessionKey"]
         upload_hosts = upload_addr.get("UploadHosts", [])
 
-        # Step 3: Upload binary to TOS
-        tos_host = upload_hosts[0] if upload_hosts else "tos-mya2lf.vodupload.com"
+        tos_host = upload_hosts[0] if upload_hosts else DOLA_TOS_FALLBACK_HOST
         upload_url = f"https://{tos_host}/upload/v1/{store_uri}"
         resp = await self._http.post(
-            upload_url, content=file_data,
+            upload_url,
+            content=file_data,
             headers={"Authorization": tos_auth, "Content-CRC32": crc32},
             timeout=120,
         )
@@ -2443,12 +2617,7 @@ class BrowserClient:
         if tos_resp.get("code") != 2000:
             raise RuntimeError(f"TOS upload failed: {tos_resp}")
 
-        # Step 4: CommitImageUpload
-        commit_url = (
-            f"{DOUBAO_URL}/top/v1?"
-            f"Action=CommitImageUpload&Version=2018-08-01"
-            f"&ServiceId={service_id}"
-        )
+        commit_url = f"{DOLA_URL}/top/v1?Action=CommitImageUpload&Version=2018-08-01&ServiceId={service_id}"
         commit_body = json.dumps({"SessionKey": session_key})
         sign_h2 = _aws_sign_v4("POST", commit_url, commit_body)
         sign_h2["Content-Type"] = "application/json"
@@ -2459,39 +2628,24 @@ class BrowserClient:
         if not results or results[0].get("UriStatus") != 2000:
             raise RuntimeError(f"CommitImageUpload failed: {body}")
 
-        log.info("File uploaded: %s -> %s", filename, store_uri)
+        log.info("File uploaded to Dola TOS: %s -> %s", filename, store_uri)
         return {"uri": store_uri, "name": filename, "size": file_size, "file_type": ext}
 
-
     @_serialized_browser_operation
-    async def get_file_download_url(
-        self,
-        uri: str,
-        expire_seconds: int = 3600,
-    ) -> Dict[str, Any]:
-        """Get a temporary CDN URL for a previously uploaded file."""
-        if not self._ready:
-            raise RuntimeError("Browser not ready - need login first")
-        query_params = self._build_query_params()
-        signed_url = await self._sign_url(
-            f"{DOUBAO_URL}/alice/message/get_file_url", query_params
-        )
-        cookie_str = await self._get_cookies_string()
-        headers = self._build_headers(cookie_str)
+    async def get_file_download_url(self, uri: str, expire_seconds: int = 3600) -> str:
+        if not self._ready or self._http is None:
+            raise RuntimeError("Camoufox browser not ready - login to Dola first")
+        signed_url = await self._sign_url(f"{DOLA_URL}/alice/message/get_file_url", self._build_query_params())
+        headers = self._build_headers(await self._get_cookies_string())
         ext = uri.rsplit(".", 1)[-1] if "." in uri else ""
         resp = await self._http.post(
             signed_url,
             headers=headers,
-            json={
-                "uris": [uri],
-                "type": "file",
-                "format": ext,
-                "expire_second": expire_seconds,
-            },
+            json={"uris": [uri], "type": "file", "format": ext, "expire_second": expire_seconds},
             timeout=30,
         )
         if resp.status_code != 200:
-            raise RuntimeError(f"get_file_url failed ({resp.status_code}): {resp.text[:500]}")
+            raise RuntimeError(f"get_file_url failed ({resp.status_code})")
         body = resp.json()
         if body.get("code") != 0:
             raise RuntimeError(f"get_file_url error: {body.get('msg', body)}")
@@ -2501,21 +2655,13 @@ class BrowserClient:
         return file_urls[0].get("main_url", "")
 
     @_serialized_browser_operation
-    async def upload_image(
-        self,
-        image_bytes: bytes,
-        filename: str = "image.png",
-    ) -> Dict[str, Any]:
-        """Upload an image and return metadata usable by chat/image generation."""
-        if not self._ready:
-            raise RuntimeError("Browser not ready - need login first")
+    async def upload_image(self, image_bytes: bytes, filename: str = "image.png") -> Dict[str, Any]:
+        """Upload an image to Dola and resolve CDN metadata."""
+        if not self._ready or self._http is None:
+            raise RuntimeError("Camoufox browser not ready - login to Dola first")
         ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "png"
-        query_params = self._build_query_params()
-        signed_url = await self._sign_url(
-            f"{DOUBAO_URL}/samantha/pages/upload_image", query_params
-        )
-        cookie_str = await self._get_cookies_string()
-        headers = self._build_headers(cookie_str)
+        signed_url = await self._sign_url(f"{DOLA_URL}/samantha/pages/upload_image", self._build_query_params())
+        headers = self._build_headers(await self._get_cookies_string())
         headers.pop("Content-Type", None)
         files = {
             "data": (filename, image_bytes, f"image/{ext}"),
@@ -2523,44 +2669,37 @@ class BrowserClient:
         }
         resp = await self._http.post(signed_url, headers=headers, files=files, timeout=60)
         if resp.status_code != 200:
-            raise RuntimeError(f"Image upload failed ({resp.status_code}): {resp.text[:500]}")
+            raise RuntimeError(f"Image upload failed ({resp.status_code})")
         body = resp.json()
         if body.get("code") != 0:
             raise RuntimeError(f"Image upload error: {body.get('msg', body)}")
         uri = body.get("data", {}).get("uri", "")
         if not uri:
             raise RuntimeError(f"Image upload returned no uri: {body}")
-        query_params = self._build_query_params()
-        file_url = await self._sign_url(
-            f"{DOUBAO_URL}/alice/message/get_file_url", query_params
-        )
-        cookie_str = await self._get_cookies_string()
-        headers = self._build_headers(cookie_str)
-        resp = await self._http.post(
+
+        file_url = await self._sign_url(f"{DOLA_URL}/alice/message/get_file_url", self._build_query_params())
+        headers2 = self._build_headers(await self._get_cookies_string())
+        resp2 = await self._http.post(
             file_url,
-            headers=headers,
-            json={
-                "uris": [uri],
-                "type": "image",
-                "format": ext,
-                "expire_second": 3600,
-            },
+            headers=headers2,
+            json={"uris": [uri], "type": "image", "format": ext, "expire_second": 3600},
             timeout=30,
         )
-        if resp.status_code != 200:
-            raise RuntimeError(f"get_file_url failed ({resp.status_code}): {resp.text[:500]}")
-        body = resp.json()
-        if body.get("code") != 0:
-            raise RuntimeError(f"get_file_url error: {body.get('msg', body)}")
-        file_urls = body.get("data", {}).get("file_urls", [])
+        if resp2.status_code != 200:
+            raise RuntimeError(f"get_file_url failed ({resp2.status_code})")
+        body2 = resp2.json()
+        if body2.get("code") != 0:
+            raise RuntimeError(f"get_file_url error: {body2.get('msg', body2)}")
+        file_urls = body2.get("data", {}).get("file_urls", [])
         if not file_urls:
             raise RuntimeError("get_file_url returned no file_urls")
         info = file_urls[0]
-        img_w = 1024
-        img_h = 1024
+
+        img_w, img_h = 1024, 1024
         try:
             import io
             from PIL import Image
+
             with Image.open(io.BytesIO(image_bytes)) as pil_img:
                 img_w, img_h = pil_img.size
                 if pil_img.format:
@@ -2581,216 +2720,40 @@ class BrowserClient:
     async def chat_with_file(
         self,
         text: str,
-        file_uri: str,
-        file_name: str,
-        file_size: int,
+        file_uri: Union[str, List[Dict[str, Any]]],
+        file_name: str = "file.txt",
+        file_size: int = 0,
         use_deep_think: int = 0,
     ) -> Dict[str, Any]:
-        """Chat with a file attachment. The AI will read the file and answer.
-
-        Args:
-            text: Question about the file.
-            file_uri: URI from upload_file() or upload_image().
-            file_name: Original filename.
-            file_size: File size in bytes.
-            use_deep_think: 0=quick, 1=think, 3=expert.
-
-        Returns:
-            Dict with 'text' and 'conversation_id'.
-        """
-        if not self._ready:
-            raise RuntimeError("Browser not ready - need login first")
-
-        msg_uuid = str(uuid.uuid4())
-        local_conv_id = f"local_{uuid.uuid4().int % 10**16}"
-        now_ms = int(time.time() * 1000)
-        now_sec = int(time.time())
-
-        if isinstance(file_uri, list):
-            file_refs = file_uri
-        else:
-            file_refs = [{"uri": file_uri, "name": file_name, "size": file_size}]
-
-        content_blocks: List[Dict[str, Any]] = []
-        file_attachments = []
-        image_attachments = []
-        for file_ref in file_refs:
-            fname = file_ref.get("name", "").lower()
+        """Chat on Dola with attached files or images."""
+        file_refs = file_uri if isinstance(file_uri, list) else [
+            {"uri": file_uri, "name": file_name, "size": file_size}
+        ]
+        file_atts: List[Dict[str, Any]] = []
+        image_atts: List[Dict[str, Any]] = []
+        for ref in file_refs:
+            fname = str(ref.get("name", "")).lower()
             fext = fname.rsplit(".", 1)[-1] if "." in fname else ""
-            is_img = fext in ("png", "jpg", "jpeg", "webp", "gif", "bmp") or file_ref.get("is_image")
-            if is_img:
-                image_attachments.append(file_ref)
+            if fext in ("png", "jpg", "jpeg", "webp", "gif", "bmp") or ref.get("is_image"):
+                image_atts.append(ref)
             else:
-                file_attachments.append({
-                    "type": 3,
-                    "identifier": str(uuid.uuid4()),
-                    "file": {
-                        "uri": file_ref.get("uri", ""),
-                        "url": "",
-                        "file_type": 0,
-                        "name": file_ref.get("name", "file.txt"),
-                        "size": int(file_ref.get("size") or 0),
-                    },
-                    "parse_state": 1,
-                    "review_state": 1,
-                    "upload_status": 1,
-                    "progress": 100,
-                    "src": "",
-                })
-
-        if file_attachments:
-            content_blocks.append({
-                "block_type": 10052,
-                "content": {
-                    "attachment_block": {
-                        "attachments": file_attachments
-                    },
-                    "pc_event_block": "",
-                },
-                "block_id": str(uuid.uuid4()),
-                "parent_id": "",
-                "meta_info": [],
-                "append_fields": [],
-            })
-
-        if image_attachments:
-            for img in image_attachments:
-                content_blocks.append({
-                    "block_type": 10052,
-                    "content": {
-                        "attachment_block": {
-                            "attachments": [{
-                                "type": 1,
-                                "identifier": str(uuid.uuid4()),
-                                "image": {
-                                    "name": img.get("name", "image.png"),
-                                    "uri": img.get("uri", ""),
-                                    "image_ori": {
-                                        "url": img.get("cdn_url", ""),
-                                        "width": int(img.get("width") or 1024),
-                                        "height": int(img.get("height") or 1024),
-                                        "format": img.get("format", "png"),
-                                        "url_formats": {},
-                                    },
-                                },
-                                "parse_state": 0,
-                                "review_state": 0,
-                            }],
-                        },
-                        "pc_event_block": "",
-                    },
-                    "block_id": str(uuid.uuid4()),
-                    "parent_id": "",
-                    "meta_info": [],
-                    "append_fields": [],
-                    "is_finish": True,
-                    "patch_type": 2,
-                })
-
-        content_blocks.append({
-            "block_type": 10000,
-            "content": {
-                "text_block": {"text": text, "icon_url": "", "icon_url_dark": "", "summary": ""},
-                "pc_event_block": "",
-            },
-            "block_id": str(uuid.uuid4()),
-            "parent_id": "",
-            "meta_info": [],
-            "append_fields": [],
-        })
-
-        payload = {
-            "client_meta": {
-                "local_conversation_id": local_conv_id,
-                "conversation_id": "",
-                "bot_id": DEFAULT_BOT_ID,
-                "last_section_id": "",
-                "last_message_index": None,
-            },
-            "messages": [{
-                "local_message_id": msg_uuid,
-                "content_block": content_blocks,
-                "message_status": 0,
-            }],
-            "option": {
-                "send_message_scene": "", "create_time_ms": now_ms, "collect_id": "",
-                "is_audio": False, "answer_with_suggest": False, "tts_switch": False,
-                "need_deep_think": use_deep_think, "click_clear_context": False,
-                "from_suggest": False, "is_regen": False, "is_replace": False,
-                "disable_sse_cache": False, "select_text_action": "",
-                "resend_for_regen": False, "scene_type": 0,
-                "unique_key": str(uuid.uuid4()), "start_seq": 0,
-                "need_create_conversation": True, "regen_query_id": [],
-                "edit_query_id": [], "regen_instruction": "",
-                "no_replace_for_regen": False, "message_from": 0,
-                "shared_app_name": "", "shared_app_id": "",
-                "sse_recv_event_options": {"support_chunk_delta": True},
-                "is_ai_playground": False,
-                "recovery_option": {"is_recovery": False, "req_create_time_sec": now_sec, "append_sse_event_scene": 0},
-                "message_storage_type": 0,
-            },
-            "ext": {
-                "use_deep_think": str(use_deep_think), "fp": self._fp or "",
-                "collection_id": "", "commerce_credit_config_enable": "0",
-                "sub_conv_firstmet_type": "1",
-            },
-        }
-
-        query_params = self._build_query_params()
-        query_string = "&".join(f"{k}={v}" for k, v in sorted(query_params.items()))
-        url = f"/chat/completion?{query_string}"
-
-        # Use browser fetch (non-streaming, collect full response)
-        js_code = """
-        async ([url, payloadJson]) => {
-            const csrf = document.cookie.match(/passport_csrf_token=([^;]+)/);
-            const csrfToken = csrf ? csrf[1] : '';
-            const headers = {
-                'Content-Type': 'application/json',
-                'agw-js-conv': 'str',
-            };
-            if (csrfToken) headers['x-tt-passport-csrf-token'] = csrfToken;
-            const res = await fetch(url, {
-                method: 'POST',
-                headers: headers,
-                body: payloadJson,
-                credentials: 'include',
-            });
-            if (!res.ok) {
-                const errBody = await res.text();
-                return {error: true, status: res.status, body: errBody.slice(0, 500)};
-            }
-            const body = await res.text();
-            return {error: false, body: body};
-        }
-        """
-        payload_json = json.dumps(payload, ensure_ascii=False)
-        log.info("POST /chat/completion [chat_with_file, browser fetch]")
-        result = await self._page.evaluate(js_code, [url, payload_json])
-
-        if result.get("error"):
-            raise RuntimeError(
-                f"chat_with_file error {result.get('status')}: {result.get('body', '')[:200]}"
-            )
+                file_atts.append(ref)
 
         full_text = ""
         conv_id = None
-        raw_body = result.get("body", "")
-        for block in raw_body.split("\n"):
-            line = block.strip()
-            if not line or not line.startswith("data: "):
-                continue
-            data_str = line[6:]
-            if not data_str or data_str == "{}":
-                continue
-            try:
-                data = json.loads(data_str)
-                full_text += self._extract_text(data)
-                if not conv_id:
-                    cid = self.extract_conversation_id(data)
-                    if cid and cid != "0":
-                        conv_id = cid
-            except json.JSONDecodeError:
-                continue
-
+        async for event in self.chat_completion(
+            text,
+            use_deep_think=use_deep_think,
+            file_attachments=file_atts or None,
+            image_attachments=image_atts or None,
+        ):
+            if event.get("error"):
+                raise RuntimeError(
+                    f"chat_with_file error {event.get('status')}: {redact_sensitive_text(str(event.get('body', ''))[:200])}"
+                )
+            full_text += self._extract_text(event)
+            if not conv_id:
+                cid = self.extract_conversation_id(event)
+                if cid and cid != "0":
+                    conv_id = cid
         return {"text": full_text, "conversation_id": conv_id}

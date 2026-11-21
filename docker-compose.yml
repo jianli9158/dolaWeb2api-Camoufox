@@ -1,0 +1,27 @@
+services:
+  dolaweb2api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: dolaweb2api-camoufox:latest
+    container_name: dolaweb2api-camoufox
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./browser_data:/app/browser_data
+      - ./runtime:/app/runtime
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DOLA_HOST=0.0.0.0
+      - DOLA_PORT=9090
+      - DOLA_HEADLESS=true
+      - DOLA_LAZY_START=${DOLA_LAZY_START:-false}
+      - DOLA_BROWSER_DATA=/app/browser_data
+      - DOLA_API_KEY=${DOLA_API_KEY:-}
+      - DOLA_PROXY=${DOLA_PROXY:-}
+      - DOLA_ACCOUNT_STRATEGY=${DOLA_ACCOUNT_STRATEGY:-failover}
+      - DOLA_LOCALE=${DOLA_LOCALE:-en-US}
+      - DOLA_TIMEZONE=${DOLA_TIMEZONE:-America/New_York}
+      - DOLA_AUTO_DELETE_CONV=${DOLA_AUTO_DELETE_CONV:-true}
+      - ALLOW_UNPROTECTED_BIND=${ALLOW_UNPROTECTED_BIND:-true}
+    restart: unless-stopped

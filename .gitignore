@@ -1,11 +1,14 @@
-# Sensitive session data and profiles
+# Sensitive session data, isolated Camoufox profiles, and runtime binaries
+.dola_browser/
+browser_data/
+runtime/
 .doubao_session.json
 .doubao_browser/
 .qianwen_browser/
 decrypted_cookies.json
 .env
 *.log
-
+logs.txt
 # Python
 __pycache__/
 *.pyc

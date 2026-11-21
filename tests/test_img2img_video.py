@@ -313,82 +313,104 @@ def test_browser_client_generate_video_attachments_payload():
 
     async def _run():
         client = BrowserClient(headless=True)
-        captured_payload = {}
+        captured = {}
 
-        async def fake_samantha_request(payload, timeout=60):
-            nonlocal captured_payload
-            captured_payload = payload
-            sse_event = {
-                "event_type": 2001,
-                "event_data": {
-                    "fin_reason": {"reason": 1, "async_task": {"id": "task_123"}}
-                },
+        async def fake_chat_completion(text, image_attachments=None, use_deep_think=0, chat_ability=None, **kwargs):
+            captured["text"] = text
+            captured["image_attachments"] = image_attachments
+            captured["chat_ability"] = chat_ability
+            yield {
+                "patch_op": [
+                    {
+                        "patch_value": {
+                            "content_block": [
+                                {
+                                    "block_type": 2074,
+                                    "content": {
+                                        "creation_block": {
+                                            "creations": [
+                                                {"video": {"video_url": "https://test.mp4"}, "duration": 10}
+                                            ]
+                                        }
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                ]
             }
-            return f"data: {json.dumps(sse_event)}\n\n"
 
-        client._samantha_request = fake_samantha_request
-        client._poll_video_result = AsyncMock(return_value={"videos": [{"video_url": "https://test.mp4"}]})
+        client.chat_completion = fake_chat_completion
 
         res = await client.generate_video(
             prompt="测试视频多图",
             ratio="16:9",
             ref_image_keys=["key_alpha", "key_beta"],
+            model="seedance-2.0-fast",
+            duration=10,
         )
         assert res["videos"][0]["video_url"] == "https://test.mp4"
-        client._poll_video_result.assert_called_once_with("task_123", "测试视频多图")
-        assert len(captured_payload["messages"]) == 1
-        msg = captured_payload["messages"][0]
-        assert msg["content_type"] == 2020
-        assert msg["attachments"] == [
-            {"type": "image", "key": "key_alpha"},
-            {"type": "image", "key": "key_beta"},
-        ]
+        assert [a["uri"] for a in captured["image_attachments"]] == ["key_alpha", "key_beta"]
+        assert captured["chat_ability"]["ability_type"] == 17
+        ab = json.loads(captured["chat_ability"]["ability_param"])
+        assert ab["model"] == "seedance_v2.0"
+        assert ab["ratio"] == "16:9"
+        assert ab["duration"] == 10
 
     asyncio.run(_run())
 
 
 def test_browser_client_generate_image_attachments_payload():
     import asyncio
-    import json
     from doubao2api.browser_client import BrowserClient
 
     async def _run():
         client = BrowserClient(headless=True)
-        captured_payload = {}
+        captured = {}
 
-        async def fake_samantha_request(payload, timeout=60):
-            nonlocal captured_payload
-            captured_payload = payload
-            inner_content = json.dumps({
-                "data": [
-                    {"image_ori": {"url": "https://img.test", "width": 1024, "height": 1024}}
-                ]
-            })
-            sse_event = {
-                "event_type": 2001,
-                "event_data": {
-                    "message": {
-                        "content_type": 2010,
-                        "content": inner_content,
+        async def fake_chat_completion(text, image_attachments=None, use_deep_think=0, **kwargs):
+            captured["text"] = text
+            captured["image_attachments"] = image_attachments
+            yield {
+                "patch_op": [
+                    {
+                        "patch_value": {
+                            "content_block": [
+                                {
+                                    "block_type": 2074,
+                                    "content": {
+                                        "creation_block": {
+                                            "creations": [
+                                                {
+                                                    "image": {
+                                                        "key": "gen_key_1",
+                                                        "image_ori": {
+                                                            "url": "https://img.test/out.png",
+                                                            "width": 1024,
+                                                            "height": 1024,
+                                                        },
+                                                    }
+                                                }
+                                            ]
+                                        }
+                                    },
+                                }
+                            ]
+                        }
                     }
-                },
+                ]
             }
-            return f"data: {json.dumps(sse_event)}\n\n"
 
-        client._samantha_request = fake_samantha_request
+        client.chat_completion = fake_chat_completion
 
         res = await client.generate_image(
             prompt="测试生图多图",
             ratio="1:1",
             ref_image_keys=["key_alpha", "key_beta"],
         )
-        assert res["images"][0]["url"] == "https://img.test"
-        assert len(captured_payload["messages"]) == 1
-        msg = captured_payload["messages"][0]
-        assert msg["attachments"] == [
-            {"type": "image", "key": "key_alpha", "extra": {"refer_types": "overall"}},
-            {"type": "image", "key": "key_beta", "extra": {"refer_types": "overall"}},
-        ]
+        assert res["images"][0]["url"] == "https://img.test/out.png"
+        assert [a["uri"] for a in captured["image_attachments"]] == ["key_alpha", "key_beta"]
+        assert "1:1" in captured["text"]
 
     asyncio.run(_run())
 

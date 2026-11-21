@@ -74,12 +74,12 @@ class AutoCaptchaHandler(CaptchaHandler):
             await asyncio.sleep(1.5)
 
         self._server.push_challenge({
-            "aid": "582478",
-            "appName": "doubao",
-            "lang": "zh",
+            "aid": "495671",
+            "appName": "dola",
+            "lang": "en",
             "did": device_id,
             "fp": fp,
-            "host": "https://verify.zijieapi.com",
+            "host": "https://verify-sg.byteoversea.com",
             "verify_data": verify_data,
         })
 

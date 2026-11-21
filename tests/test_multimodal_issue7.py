@@ -119,26 +119,28 @@ def test_browser_client_upload_image_dimensions():
 def test_chat_completion_multimodal_block_structure():
     """Verify chat_completion builds type: 1 Attachment for images with authentic dimensions."""
     async def _run():
+        from doubao2api.bidi_transport import BiDiClient
+
         client = BrowserClient()
         client._ready = True
-        client._page = AsyncMock()
-        client._page.is_closed = MagicMock(return_value=False)
-        client.is_alive = AsyncMock(return_value=True)
+        bidi = BiDiClient(AsyncMock(), AsyncMock())
+        client._bidi = bidi
+        client._context_id = "ctx-1"
         client._sign_url = AsyncMock(return_value="/chat/completion?sig=123")
 
         sent_payload = None
 
-        async def mock_evaluate(script, payload=None, *args, **kwargs):
+        async def mock_call_function(ctx_id, fn, args=None, **kwargs):
             nonlocal sent_payload
-            if isinstance(payload, list) and len(payload) >= 3:
-                sent_payload = json.loads(payload[1])
-                req_id = payload[2]
-                if req_id in client._stream_queues:
-                    client._stream_queues[req_id].put_nowait(None)
-            return {"done": True, "events": []}
+            if isinstance(args, list) and len(args) >= 4:
+                sent_payload = json.loads(args[1]["value"])
+                ch_name = args[3]["value"]["channel"]
+                ch = bidi._channels.get(ch_name)
+                if ch:
+                    ch.push({"type": "string", "value": "__DONE__"})
+            return None
 
-        client._page.evaluate = mock_evaluate
-
+        bidi.call_function = mock_call_function
         image_attachments = [{
             "name": "photo.png",
             "uri": "tos-test-key",
