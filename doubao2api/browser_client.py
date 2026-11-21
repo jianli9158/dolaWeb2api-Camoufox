@@ -2311,6 +2311,8 @@ class BrowserClient:
             "quota exceeded",
             "limit reached",
             "out of credits",
+            "free limit",
+            "free quota",
             "upgrade",
             "subscribe",
             "今日生成次数已达上限",
@@ -2318,8 +2320,11 @@ class BrowserClient:
             "额度已用尽",
             "达到今日上限",
             "次数超限",
+            "免费数量用完了",
+            "数量用完了",
+            "开通 dola 会员",
+            "doubao_create_video",
         )
-
         eff_mem_type = resolve_memory_type(memory_type, save_history)
         videos: List[Dict[str, Any]] = []
         seen_urls: set = set()
@@ -2386,16 +2391,27 @@ class BrowserClient:
                 )
             raise VideoQuotaExceeded("Video generation quota exceeded for active account")
 
-        # If Dola queued an async video task (1-3 min), stream `/chat/async/chunk_stream` until completion
-        if not videos and task_id and self._bidi and self._context_id:
-            log.info("Dola Seedance video queued async task_id=%s; streaming async result...", task_id)
-            polled = await self._poll_async_video_stream(task_id, conv_id=conv_id, timeout=240.0)
-            for v in polled:
-                if v["video_url"] not in seen_urls:
-                    seen_urls.add(v["video_url"])
-                    videos.append(v)
+        # If Dola queued an async video task (1-3 min), stream `/chat/async/chunk_stream`
+        # and fall back to polling Dola's real `/im/chain/single` (cmd=3100) conversation history.
+        queued_markers = ("大约需要", "生成好后", "主动发送", "seedance", "minutes", "will send", "generating")
+        is_async_queued = bool(task_id) or any(m in full_text.lower() for m in queued_markers)
+        if not videos and is_async_queued and self._bidi and self._context_id:
+            if task_id:
+                log.info("Dola Seedance video queued async task_id=%s; streaming async result...", task_id)
+                polled = await self._poll_async_video_stream(task_id, conv_id=conv_id, timeout=240.0)
+                for v in polled:
+                    if v["video_url"] not in seen_urls:
+                        seen_urls.add(v["video_url"])
+                        videos.append(v)
+            if not videos and conv_id:
+                log.info("Polling Dola /im/chain/single for async video in conv=%s...", conv_id)
+                polled_conv = await self._poll_conversation_videos(conv_id, timeout=210.0)
+                for v in polled_conv:
+                    if v["video_url"] not in seen_urls:
+                        seen_urls.add(v["video_url"])
+                        videos.append(v)
 
-        if conv_id and eff_mem_type == 2 and (videos or not task_id):
+        if conv_id and eff_mem_type == 2 and (videos or not is_async_queued):
             try:
                 await self.delete_conversation(conv_id)
             except Exception:
@@ -2409,6 +2425,62 @@ class BrowserClient:
             "conversation_id": conv_id,
             "message": full_text,
         }
+
+    async def _poll_conversation_videos(
+        self, conv_id: str, *, timeout: float = 210.0, interval: float = 6.0
+    ) -> List[Dict[str, Any]]:
+        """Poll Dola `/im/chain/single` (cmd=3100) until an async Seedance video message appears."""
+        if not self._bidi or not self._context_id or not conv_id:
+            return []
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            await asyncio.sleep(interval)
+            try:
+                url = await self._sign_url("/im/chain/single", self._build_query_params())
+                body = {
+                    "cmd": 3100,
+                    "uplink_body": {
+                        "pull_singe_chain_uplink_body": {
+                            "conversation_id": str(conv_id),
+                            "anchor_index": 9007199254740991,
+                            "conversation_type": 3,
+                            "direction": 1,
+                            "limit": 20,
+                            "ext": {},
+                            "filter": {"index_list": []},
+                            "evaluate_ab_params": "",
+                            "evaluate_common_params": "",
+                            "option": {"lazy_load_strategy": 0},
+                        }
+                    },
+                    "sequence_id": str(uuid.uuid4()),
+                    "channel": 2,
+                    "version": "1",
+                }
+                res = await self._bidi.evaluate(
+                    self._context_id,
+                    f"""(async () => {{
+                        const csrf = (document.cookie.match(/passport_csrf_token=([^;]+)/) || [])[1] || '';
+                        const r = await fetch({json.dumps(url)}, {{
+                            method: 'POST',
+                            headers: {{'Content-Type': 'application/json', 'agw-js-conv': 'str', 'x-tt-passport-csrf-token': csrf}},
+                            body: {json.dumps(json.dumps(body))},
+                            credentials: 'include'
+                        }});
+                        return {{status: r.status, text: await r.text()}};
+                    }})()""",
+                    await_promise=True,
+                    timeout=20.0,
+                )
+                if not isinstance(res, dict) or res.get("status") != 200:
+                    continue
+                parsed = json.loads(res.get("text") or "{}")
+                vids = self._extract_videos_from_event(parsed)
+                if vids:
+                    return vids
+            except Exception as exc:
+                log.warning("Dola /im/chain/single poll failed: %s", redact_sensitive_text(str(exc)))
+        return []
 
     async def _poll_async_video_stream(
         self, task_id: str, *, conv_id: Optional[str] = None, timeout: float = 240.0
