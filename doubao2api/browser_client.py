@@ -949,8 +949,8 @@ class BrowserClient:
             await asyncio.sleep(1)
 
     async def _wait_for_signing(self):
-        """Wait for window.bdms.frontierSign to become available."""
-        for i in range(12):
+        """Wait briefly for window.bdms.frontierSign (falls back cleanly to in-page fetch hook if absent)."""
+        for i in range(4):
             async with self.operation_gate.lease():
                 if not self._bidi or not self._context_id:
                     return
@@ -964,8 +964,7 @@ class BrowserClient:
                 log.info("bdms.frontierSign ready after %ds", (i + 1) * 2)
                 return
             await asyncio.sleep(2)
-        log.warning("bdms.frontierSign not detected after 24s - upload signing may fail")
-
+        log.info("bdms.frontierSign absent; relying on in-page Dola fetch hook for signing")
     async def _verify_fetch_hook(self) -> bool:
         """Verify ByteDance's in-page fetch interceptor is active (auto-injects msToken & a_bogus)."""
         for i in range(10):
@@ -1177,7 +1176,7 @@ class BrowserClient:
             raise RuntimeError("Camoufox BiDi not connected")
 
         last_error = None
-        for attempt in range(3):
+        for attempt in range(2):
             try:
                 sig = await self._bidi.call_function(
                     self._context_id,
@@ -1200,8 +1199,23 @@ class BrowserClient:
             except Exception as exc:
                 last_error = f"signing failed ({type(exc).__name__})"
                 log.warning("frontierSign attempt %d failed (%s)", attempt + 1, type(exc).__name__)
-            if attempt < 2:
-                await asyncio.sleep(1)
+            if attempt < 1:
+                await asyncio.sleep(0.5)
+
+        # On some regions (e.g. US), Dola hooks window.fetch without exposing window.bdms.frontierSign;
+        # passing the unsigned URL lets the native in-page fetch interceptor attach msToken + a_bogus.
+        try:
+            hooked = await self._bidi.evaluate(
+                self._context_id,
+                "(() => { try { return !window.fetch.toString().includes('native code'); } catch(e) { return false; } })()",
+                await_promise=False,
+                timeout=5.0,
+            )
+            if hooked:
+                log.info("Using in-page Dola fetch hook fallback for %s", base_url)
+                return f"{base_url}?{query_string}"
+        except Exception:
+            pass
 
         raise RuntimeError(f"Failed to generate bdms signature: {last_error}")
 

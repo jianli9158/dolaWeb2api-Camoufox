@@ -348,3 +348,39 @@ def test_dola_710022002_high_demand_classified_as_transient_rate_limit():
     assert bare.category == "verification"
     assert bare.status_code == 503
 
+
+def test_persistent_request_logs_include_account_and_survive_restart(tmp_path):
+    from fastapi.testclient import TestClient
+    from doubao2api.browser_client import BrowserClient
+    from doubao2api.unified_server import create_app
+
+    client1 = BrowserClient(headless=True, user_data_dir=str(tmp_path))
+    acc = client1.account_manager.add_or_update_account(
+        name="Dola-Log-Test",
+        cookies={"sessionid": "sid_log_test"},
+        proxy_url="http://user:secret@1.2.3.4:8080",
+    )
+    app1 = create_app(browser_client=client1)
+    tc1 = TestClient(app1)
+    assert tc1.get("/v1/models").status_code == 200
+
+    logs1 = tc1.get("/admin/api/logs").json()
+    assert len(logs1) >= 1
+    last = logs1[-1]
+    assert last["path"] == "/v1/models"
+    assert last["account_id"] == acc.id
+    assert last["account_name"] == "Dola-Log-Test"
+    assert "secret" not in last["proxy"]
+    assert (tmp_path / "request_logs.jsonl").exists()
+
+    # Simulate server restart with a brand-new create_app() pointing to same data dir
+    client2 = BrowserClient(headless=True, user_data_dir=str(tmp_path))
+    app2 = create_app(browser_client=client2)
+    tc2 = TestClient(app2)
+    logs2 = tc2.get(f"/admin/api/logs?account_id={acc.id}").json()
+    assert len(logs2) >= 1
+    assert logs2[-1]["account_name"] == "Dola-Log-Test"
+
+    assert tc2.delete("/admin/api/logs").status_code == 200
+    assert tc2.get("/admin/api/logs").json() == []
+

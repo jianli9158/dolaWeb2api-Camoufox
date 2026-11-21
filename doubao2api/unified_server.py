@@ -193,12 +193,47 @@ ALL_MODELS = [
     {"id": "seedance-1.0", "object": "model", "owned_by": "dola", "created": 0},
     {"id": "dola-music", "object": "model", "owned_by": "dola", "created": 0},
 ]
-# ── Recent Media Buffer (P2: Gallery) ────────────────────────
+# ── Recent Media Buffer & Persistent Store ───────────────────
 from collections import deque
 _recent_media: deque = deque(maxlen=30)
+_MEDIA_STORE_PATH: Optional[str] = None
 
-def _record_recent_media(media_type: str, url: str, prompt: str, cover_url: str = "", model: str = ""):
-    """Record generated image or video for admin gallery display."""
+def _load_recent_media(data_dir: str) -> None:
+    global _MEDIA_STORE_PATH
+    _MEDIA_STORE_PATH = os.path.join(data_dir, "recent_media.json")
+    if os.path.exists(_MEDIA_STORE_PATH):
+        try:
+            with open(_MEDIA_STORE_PATH, "r", encoding="utf-8") as f:
+                items = json.load(f)
+            if isinstance(items, list):
+                _recent_media.clear()
+                for item in items[:30]:
+                    if isinstance(item, dict):
+                        _recent_media.append(item)
+        except Exception:
+            pass
+def _save_recent_media() -> None:
+    if not _MEDIA_STORE_PATH:
+        return
+    try:
+        os.makedirs(os.path.dirname(_MEDIA_STORE_PATH), exist_ok=True)
+        tmp = _MEDIA_STORE_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(list(_recent_media), f, ensure_ascii=False, indent=2)
+        os.replace(tmp, _MEDIA_STORE_PATH)
+    except Exception:
+        pass
+
+def _record_recent_media(
+    media_type: str,
+    url: str,
+    prompt: str,
+    cover_url: str = "",
+    model: str = "",
+    account_id: str = "",
+    account_name: str = "",
+):
+    """Record generated image or video for admin gallery display and persist to disk."""
     _recent_media.appendleft({
         "id": f"med_{int(time.time()*1000)}_{uuid.uuid4().hex[:6]}",
         "type": media_type,
@@ -206,9 +241,11 @@ def _record_recent_media(media_type: str, url: str, prompt: str, cover_url: str 
         "cover_url": cover_url or url,
         "prompt": prompt,
         "model": model,
+        "account_id": account_id,
+        "account_name": account_name,
         "created_at": time.time(),
     })
-
+    _save_recent_media()
 
 # ── Expert Mode Quota Tracker ──
 class ExpertQuotaTracker:
@@ -283,11 +320,73 @@ def _size_to_ratio(size):
         return size
     return "1:1"
 
-# ── Request log ring buffer ───────────────────────────────────
+# ── Persistent request log ring buffer ───────────────────────
 
-_REQUEST_LOG: collections.deque = collections.deque(maxlen=100)
+_REQUEST_LOG: collections.deque = collections.deque(maxlen=500)
 _SERVER_START_TIME: float = time.time()
 
+
+class _PersistentRequestLog:
+    """Append-only JSONL request log persisted under DOLA_BROWSER_DATA/request_logs.jsonl."""
+
+    def __init__(self, data_dir: str, maxlen: int = 500):
+        self.path = os.path.join(data_dir, "request_logs.jsonl")
+        self.maxlen = maxlen
+        self._line_count = 0
+        self.load()
+
+    def load(self) -> None:
+        _REQUEST_LOG.clear()
+        self._line_count = 0
+        if not os.path.exists(self.path):
+            return
+        try:
+            with open(self.path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    self._line_count += 1
+                    try:
+                        obj = json.loads(line)
+                        if isinstance(obj, dict):
+                            _REQUEST_LOG.append(obj)
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
+    def append(self, entry: Dict[str, Any]) -> None:
+        _REQUEST_LOG.append(entry)
+        try:
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            with open(self.path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            self._line_count += 1
+            if self._line_count > self.maxlen * 2:
+                self._compact()
+        except Exception:
+            pass
+
+    def _compact(self) -> None:
+        try:
+            tmp = self.path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                for item in _REQUEST_LOG:
+                    f.write(json.dumps(item, ensure_ascii=False) + "\n")
+            os.replace(tmp, self.path)
+            self._line_count = len(_REQUEST_LOG)
+        except Exception:
+            pass
+
+    def clear(self) -> None:
+        _REQUEST_LOG.clear()
+        self._line_count = 0
+        try:
+            if os.path.exists(self.path):
+                os.remove(self.path)
+        except Exception:
+            pass
 
 # ── Rate limiter ─────────────────────────────────────────────
 
@@ -414,8 +513,20 @@ def create_app(
     _conversation_account_ids: Dict[str, str] = {}
     _resource_account_ids: Dict[str, str] = {}
 
-    _login_manager = DolaLoginManager()
+    _raw_data_dir = getattr(browser_client, "user_data_dir", None) if browser_client is not None else None
+    _log_data_dir = (
+        str(_raw_data_dir)
+        if isinstance(_raw_data_dir, (str, os.PathLike)) and str(_raw_data_dir)
+        else os.path.expanduser(
+            os.environ.get("DOLA_BROWSER_DATA")
+            or os.environ.get("DOUBAO_BROWSER_DATA")
+            or "~/.dola_browser"
+        )
+    )
+    _request_log_store = _PersistentRequestLog(_log_data_dir, maxlen=500)
+    _load_recent_media(_log_data_dir)
 
+    _login_manager = DolaLoginManager()
     async def _browser_watchdog():
         """Background task: keep headless runtime healthy ONLY when accounts exist and no manage session holds the profile."""
         consecutive_dead = 0
@@ -995,15 +1106,30 @@ def create_app(
         start = time.time()
         response = await call_next(request)
         elapsed = round((time.time() - start) * 1000)
-        _REQUEST_LOG.append({
+        account_id = str(getattr(request.state, "log_account_id", "") or "")
+        account_name = str(getattr(request.state, "log_account_name", "") or "")
+        proxy_masked = str(getattr(request.state, "log_proxy", "") or "")
+        model_used = str(getattr(request.state, "log_model", "") or "")
+        if not account_id:
+            client_obj = _browser.get("client")
+            am = getattr(client_obj, "account_manager", None) if client_obj is not None else None
+            active_acc = am.get_active_account() if isinstance(am, AccountManager) else None
+            if active_acc is not None:
+                account_id = active_acc.id
+                account_name = active_acc.name
+                proxy_masked = mask_proxy_url(active_acc.proxy_url) if active_acc.proxy_url else ""
+        _request_log_store.append({
             "ts": time.time(),
             "method": request.method,
             "path": path,
             "status": response.status_code,
             "ms": elapsed,
+            "model": model_used,
+            "account_id": account_id,
+            "account_name": account_name,
+            "proxy": proxy_masked,
         })
         return response
-
     # ── Endpoints ──
 
     @app.get("/health/live")
@@ -1367,7 +1493,7 @@ def create_app(
                 raise HTTPException(status_code=400, detail="No text content")
             if not prompt:
                 prompt = "请描述这张图片" if image_refs else "请总结或分析所附带的文件内容"
-
+        request.state.log_model = model_name
         await bucket.acquire()
         client = _get_client()
         bound_resource_ids = [
@@ -1599,6 +1725,7 @@ def create_app(
         elif not _auto_delete_conv:
             gen_kwargs["memory_type"] = 0
 
+        request.state.log_model = body.model or "seedream-4.5"
         if body.model and body.model not in ("doubao-image", "dola-image"):
             gen_kwargs["model"] = body.model
         try:
@@ -1610,7 +1737,7 @@ def create_app(
             )
         except UpstreamAPIError as exc:
             await _recover_upstream_error(
-                client, exc.upstream_error, feature="image", allow_account_switch=False
+                client, exc.upstream_error, admin_url=_admin_url(request), feature="image", allow_account_switch=False
             )
             raise
         except RuntimeError as exc:
@@ -1628,7 +1755,16 @@ def create_app(
                 "url": img["url"],
                 "revised_prompt": body.prompt,
             })
-            _record_recent_media("image", img["url"], body.prompt, model=body.model)
+            _am_img = getattr(client, "account_manager", None)
+            _act = _am_img.get_active_account() if isinstance(_am_img, AccountManager) else None
+            _record_recent_media(
+                "image",
+                img["url"],
+                body.prompt,
+                model=body.model,
+                account_id=_act.id if _act else "",
+                account_name=_act.name if _act else "",
+            )
 
         return JSONResponse({
             "created": int(time.time()),
@@ -1759,7 +1895,7 @@ def create_app(
             )
         except UpstreamAPIError as exc:
             await _recover_upstream_error(
-                client, exc.upstream_error, feature="image", allow_account_switch=False
+                client, exc.upstream_error, admin_url=_admin_url(request), feature="image", allow_account_switch=False
             )
             raise
         except RuntimeError as exc:
@@ -1950,6 +2086,7 @@ def create_app(
         elif not _auto_delete_conv:
             history_kwargs["memory_type"] = 0
 
+        request.state.log_model = model or "seedance-2.0-fast"
         manager = getattr(client, "account_manager", None)
         attempted_account_ids: set[str] = set()
         while True:
@@ -2007,7 +2144,7 @@ def create_app(
                 ref_image_key = ref_image_keys[0] if ref_image_keys else None
             except UpstreamAPIError as exc:
                 await _recover_upstream_error(
-                    client, exc.upstream_error, feature="video", allow_account_switch=False
+                    client, exc.upstream_error, admin_url=_admin_url(request), feature="video", allow_account_switch=False
                 )
                 raise
             except RuntimeError as exc:
@@ -2024,9 +2161,18 @@ def create_app(
         if not videos:
             raise HTTPException(status_code=502, detail="No videos generated")
 
+        _am_vid = getattr(client, "account_manager", None)
+        _act_v = _am_vid.get_active_account() if isinstance(_am_vid, AccountManager) else None
         for vid in videos:
-            _record_recent_media("video", vid.get("video_url", ""), prompt, cover_url=vid.get("cover_url", ""), model="doubao-video")
-
+            _record_recent_media(
+                "video",
+                vid.get("video_url", ""),
+                prompt,
+                cover_url=vid.get("cover_url", ""),
+                model=model or "seedance-2.0-fast",
+                account_id=_act_v.id if _act_v else "",
+                account_name=_act_v.name if _act_v else "",
+            )
         return JSONResponse({
             "created": int(time.time()),
             "data": videos,
@@ -2901,11 +3047,25 @@ def create_app(
         })
 
     @app.get("/admin/api/logs")
-    async def admin_logs(request: Request):
-        """Return recent request logs from ring buffer."""
+    async def admin_logs(
+        request: Request,
+        account_id: Optional[str] = None,
+        limit: int = 200,
+    ):
+        """Return persisted request logs (with account_id/account_name/model), optionally filtered by account."""
         _check_auth(request)
-        return JSONResponse(list(_REQUEST_LOG))
+        items = list(_REQUEST_LOG)
+        if account_id:
+            items = [x for x in items if x.get("account_id") == account_id]
+        eff_limit = max(1, min(int(limit or 200), 500))
+        return JSONResponse(items[-eff_limit:])
 
+    @app.delete("/admin/api/logs")
+    async def admin_clear_logs(request: Request):
+        """Clear persisted request logs."""
+        _check_auth(request)
+        _request_log_store.clear()
+        return JSONResponse({"status": "ok", "cleared": True})
     @app.get("/admin/api/cookies")
     async def admin_cookies(request: Request):
         """Return current Dola browser cookies (masked for security)."""

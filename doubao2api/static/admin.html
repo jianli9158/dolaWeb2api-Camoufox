@@ -452,33 +452,53 @@
       <!-- =============================================================== -->
       <section v-show="activeTab===3" class="space-y-4 max-w-6xl mx-auto">
         <div class="card space-y-3">
-          <div class="flex items-center justify-between">
-            <h3 class="text-sm font-bold text-white">📋 最近 API 请求日志</h3>
-            <button @click="fetchLogs" class="btn btn-sm">🔄 刷新</button>
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h3 class="text-sm font-bold text-white">📋 API 调用日志（持久化存储）</h3>
+              <p class="text-[11px] text-slate-500 mt-0.5">持久化至 <code class="text-slate-400">request_logs.jsonl</code>，重启不丢失，含执行账号与出口代理</p>
+            </div>
+            <div class="flex items-center gap-2">
+              <select v-model="logFilterAccount" @change="fetchLogs" class="input text-xs py-1.5 w-44">
+                <option value="">全部账号</option>
+                <option v-for="acc in accounts" :key="acc.id" :value="acc.id">{{acc.name}} ({{acc.id}})</option>
+              </select>
+              <button @click="fetchLogs" class="btn btn-sm">🔄 刷新</button>
+              <button @click="clearLogs" class="btn btn-sm btn-danger">🗑️ 清空</button>
+            </div>
           </div>
           <div class="overflow-x-auto">
             <table class="w-full text-xs font-mono">
               <thead>
                 <tr class="text-left text-slate-500 border-b border-slate-800">
-                  <th class="py-2">时间</th>
-                  <th class="py-2">方法</th>
-                  <th class="py-2">路径</th>
-                  <th class="py-2">状态</th>
+                  <th class="py-2 pr-3">时间</th>
+                  <th class="py-2 pr-3">执行账号</th>
+                  <th class="py-2 pr-3">模型</th>
+                  <th class="py-2 pr-3">方法</th>
+                  <th class="py-2 pr-3">路径</th>
+                  <th class="py-2 pr-3">状态</th>
                   <th class="py-2 text-right">耗时</th>
                 </tr>
               </thead>
               <tbody class="divide-y divide-slate-800/60">
                 <tr v-for="(l, idx) in logs" :key="idx">
-                  <td class="py-2 text-slate-400">{{formatTs(l.ts)}}</td>
-                  <td class="py-2 text-indigo-300">{{l.method}}</td>
-                  <td class="py-2 text-slate-200">{{l.path}}</td>
-                  <td class="py-2">
+                  <td class="py-2 pr-3 text-slate-400 whitespace-nowrap">{{formatTs(l.ts)}}</td>
+                  <td class="py-2 pr-3 whitespace-nowrap" :title="l.proxy || '直连'">
+                    <span v-if="l.account_name || l.account_id" class="badge bg-indigo-950/70 text-indigo-300 border border-indigo-700/40">
+                      {{l.account_name || l.account_id}}
+                    </span>
+                    <span v-else class="text-slate-600">-</span>
+                    <span v-if="l.account_id && l.account_name" class="text-[10px] text-slate-500 ml-1">{{l.account_id}}</span>
+                  </td>
+                  <td class="py-2 pr-3 text-slate-300 whitespace-nowrap">{{l.model || '-'}}</td>
+                  <td class="py-2 pr-3 text-indigo-300">{{l.method}}</td>
+                  <td class="py-2 pr-3 text-slate-200">{{l.path}}</td>
+                  <td class="py-2 pr-3">
                     <span :class="l.status < 400 ? 'text-emerald-400' : 'text-rose-400'">{{l.status}}</span>
                   </td>
-                  <td class="py-2 text-right text-slate-400">{{l.ms}} ms</td>
+                  <td class="py-2 text-right text-slate-400 whitespace-nowrap">{{l.ms}} ms</td>
                 </tr>
                 <tr v-if="!logs.length">
-                  <td colspan="5" class="py-8 text-center text-slate-500">暂无请求记录</td>
+                  <td colspan="7" class="py-8 text-center text-slate-500">暂无请求记录</td>
                 </tr>
               </tbody>
             </table>
@@ -1223,18 +1243,32 @@ createApp({
       } catch {}
     }
 
+    const logFilterAccount = ref('');
+
     async function fetchLogs() {
       try {
-        const d = await api('/admin/api/logs');
+        const qs = logFilterAccount.value ? `?account_id=${encodeURIComponent(logFilterAccount.value)}` : '';
+        const d = await api('/admin/api/logs' + qs);
         logs.value = (Array.isArray(d) ? d : (d.logs || [])).slice().reverse();
+      } catch {}
+    }
+
+    async function clearLogs() {
+      if (!confirm('确认清空全部持久化请求日志？')) return;
+      try {
+        await api('/admin/api/logs', { method: 'DELETE' });
+        logs.value = [];
       } catch {}
     }
 
     function formatTs(ts) {
       if (!ts) return '';
-      return new Date(ts * 1000).toLocaleTimeString('zh-CN', { hour12: false });
+      const d = new Date(ts * 1000);
+      const mm = String(d.getMonth() + 1).padStart(2, '0');
+      const dd = String(d.getDate()).padStart(2, '0');
+      const t = d.toLocaleTimeString('zh-CN', { hour12: false });
+      return `${mm}-${dd} ${t}`;
     }
-
     function switchTab(i) {
       activeTab.value = i;
       if (i === 0) refreshAll();
@@ -1271,7 +1305,7 @@ createApp({
       accountActionLoading, probingAccounts,
       setStrategy, switchAccount, clearAccountCaptcha, clearAccountCooldown, deleteAccount, probeAllAccounts,
       proxyState, saveGlobalProxy,
-      logs, fetchLogs, formatTs,
+      logs, logFilterAccount, fetchLogs, clearLogs, formatTs,
       recentMedia, fetchRecentMedia,
       liveViewImg, browserModal, openBrowserAddModal, openManageAccountBrowser,
       startBrowserLoginSession, sendSessionInput, onLiveMouse, onLiveMouseMove, onLiveWheel, onLiveKey,
