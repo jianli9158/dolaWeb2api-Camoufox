@@ -171,8 +171,17 @@ pytest -q
 
 ---
 
-## 致谢与声明
+## 参考项目与致谢
 
-- 浏览器运行时、隔离资料管理、Web LiveView 与代理中继架构参考 [flow2api-Camoufox](https://github.com/jianli9158/flow2api-Camoufox)。
-- 初版 OpenAI 协议桥接思路致谢开源社区 `doubao2api` 相关项目。
-- 本项目采用 [Apache-2.0 License](LICENSE) 开源协议，仅供编程学习、浏览器自动化与个人研究使用，请遵守目标平台服务条款。
+本项目在架构设计与实现过程中参考并致谢以下开源项目：
+
+- **[flow2api-Camoufox](https://github.com/jianli9158/flow2api-Camoufox)**：参考了原生 Camoufox + 纯 Python WebDriver BiDi 传输引擎、Windows Firefox 指纹锁定与资源模板、OS 级文件锁与单账号独立隔离资料目录架构、Web LiveView 远程交互浏览器、本地 `LocalSocks5Relay` 代理中继、敏感信息日志脱敏及统一多账号管理台 UI/交互设计。
+- **[SeiShonagon520/doubao2api](https://github.com/SeiShonagon520/doubao2api)**（含早期 `Copyright 2025 wangchuxiaoji-oss` / Apache-2.0 原始代码基线）：参考并演进了初版 OpenAI 兼容 API 路由桥接、多账号调度/冷却机制、会话管理与自动化测试框架。
+- **[Camoufox](https://github.com/daijro/camoufox)**：提供底层防指纹检测的定制 Firefox 浏览器内核。
+
+---
+
+## 开源协议与声明
+
+- 本项目采用 **[MIT License](LICENSE)** 开源协议（早期源自 `doubao2api` 的部分基础代码保留其原作者与参考归属说明）。
+- 本项目仅供编程学习、浏览器自动化与个人研究使用，请遵守目标平台服务条款。

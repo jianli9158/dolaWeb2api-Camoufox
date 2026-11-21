@@ -7,7 +7,7 @@ name = "dolaWeb2api-Camoufox"
 dynamic = ["version"]
 description = "dolaWeb2api-Camoufox - Dola International OpenAI-compatible API gateway powered by native Camoufox & WebDriver BiDi"
 readme = "README.md"
-license = "Apache-2.0"
+license = "MIT"
 requires-python = ">=3.10"
 authors = [
     { name = "jianli9158" },
@@ -16,7 +16,7 @@ keywords = ["dola", "dolaWeb2api", "camoufox", "webdriver-bidi", "seedream", "se
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: Apache Software License",
+    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
